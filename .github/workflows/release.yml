@@ -1,0 +1,408 @@
+name: Build and Release Installers
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # =======================================================
+  # 1. WINDOWS (.exe, .msi oraz .zip portable)
+  # =======================================================
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Pobierz kod
+        uses: actions/checkout@v4
+
+      - name: Konfiguracja Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Kompilacja w trybie Release
+        run: cargo build --release
+
+      - name: Przygotowanie plików do dystrybucji
+        shell: pwsh
+        run: |
+          mkdir dist
+          mkdir dist\sql-editor
+          Copy-Item target\release\sql-editor.exe dist\sql-editor\
+          Copy-Item README.md dist\sql-editor\
+          Copy-Item LICENSE dist\sql-editor\
+          Copy-Item -Recurse assets dist\sql-editor\
+
+      - name: Przygotowanie certyfikatu i podpis cyfrowy pliku wykonywalnego
+        shell: pwsh
+        run: |
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=SQL Editor, O=SQL Editor Project, C=US" -CertStoreLocation "Cert:\CurrentUser\My" -NotAfter (Get-Date).AddYears(5)
+          $pfxPassword = ConvertTo-SecureString -String "SQLEditorPass123!" -Force -AsPlainText
+          Export-PfxCertificate -Cert $cert -FilePath "SQLEditorCert.pfx" -Password $pfxPassword
+
+          $signtool = (Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin\" -Filter signtool.exe -Recurse | Where-Object { $_.FullName -like "*x64*" } | Select-Object -Last 1).FullName
+          if (-not $signtool) {
+            $signtool = (Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin\" -Filter signtool.exe -Recurse | Select-Object -Last 1).FullName
+          }
+          Write-Host "Używam signtool: $signtool"
+
+          Write-Host "Podpisywanie dist/sql-editor/sql-editor.exe..."
+          & $signtool sign /f "SQLEditorCert.pfx" /p "SQLEditorPass123!" /fd SHA256 /tr "http://timestamp.digicert.com" /td SHA256 "dist\sql-editor\sql-editor.exe"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Timestamp serwer niedostepny, podpisywanie bez znacznika czasu..."
+            & $signtool sign /f "SQLEditorCert.pfx" /p "SQLEditorPass123!" /fd SHA256 "dist\sql-editor\sql-editor.exe"
+          }
+
+      - name: Przygotowanie wersji przenośnej (Portable ZIP)
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\sql-editor\* -DestinationPath sql-editor-windows-portable.zip
+
+      - name: Budowanie instalatora MSI (WiX Toolset)
+        shell: bash
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          if [[ ! $VERSION =~ ^[0-9]+\.[0-9]+ ]]; then VERSION="0.5.2"; fi
+
+          # Generowanie pliku komponentów WiX z folderu aplikacji
+          heat dir "dist/sql-editor" -cg AppFiles -gg -scom -sreg -srd -dr INSTALLFOLDER -var var.SourceDir -out files.wxs
+
+          cat << 'EOF' > product.wxs
+          <?xml version="1.0" encoding="UTF-8"?>
+          <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+            <Product Id="*" Name="SQL Editor" Language="1033" Version="VERSION_PLACEHOLDER" Manufacturer="SQL Editor Project" UpgradeCode="a6b8c9d0-1234-4567-89ab-cdef01234567">
+              <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine" />
+              <MajorUpgrade DowngradeErrorMessage="Nowsza wersja programu jest juz zainstalowana." />
+              <MediaTemplate EmbedCab="yes" />
+
+              <Icon Id="AppIcon.ico" SourceFile="assets/icon.ico" />
+              <Property Id="ARPPRODUCTICON" Value="AppIcon.ico" />
+
+              <Feature Id="ProductFeature" Title="SQL Editor" Level="1">
+                <ComponentGroupRef Id="AppFiles" />
+                <ComponentRef Id="ApplicationStartMenuShortcut" />
+                <ComponentRef Id="ApplicationDesktopShortcut" />
+              </Feature>
+            </Product>
+
+            <Fragment>
+              <Directory Id="TARGETDIR" Name="SourceDir">
+                <Directory Id="ProgramFilesFolder">
+                  <Directory Id="INSTALLFOLDER" Name="SQL Editor" />
+                </Directory>
+                <Directory Id="ProgramMenuFolder">
+                  <Directory Id="ApplicationProgramsFolder" Name="SQL Editor">
+                    <Component Id="ApplicationStartMenuShortcut" Guid="7b8c9d0e-1234-4567-89ab-cdef01234567">
+                      <Shortcut Id="StartMenuShortcut"
+                                Name="SQL Editor"
+                                Description="SQL Editor - Fast Cross-Platform Database Client"
+                                Target="[INSTALLFOLDER]sql-editor.exe"
+                                WorkingDirectory="INSTALLFOLDER"
+                                Icon="AppIcon.ico" />
+                      <RemoveFolder Id="CleanUpStartMenu" Directory="ApplicationProgramsFolder" On="uninstall" />
+                      <RegistryValue Root="HKCU" Key="Software\SQLEditor" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+                    </Component>
+                  </Directory>
+                </Directory>
+                <Directory Id="DesktopFolder" Name="Desktop">
+                  <Component Id="ApplicationDesktopShortcut" Guid="8c9d0e1f-1234-4567-89ab-cdef01234567">
+                    <Shortcut Id="DesktopShortcut"
+                              Name="SQL Editor"
+                              Description="SQL Editor - Fast Cross-Platform Database Client"
+                              Target="[INSTALLFOLDER]sql-editor.exe"
+                              WorkingDirectory="INSTALLFOLDER"
+                              Icon="AppIcon.ico" />
+                    <RegistryValue Root="HKCU" Key="Software\SQLEditor" Name="desktop_shortcut" Type="integer" Value="1" KeyPath="yes" />
+                  </Component>
+                </Directory>
+              </Directory>
+            </Fragment>
+          </Wix>
+          EOF
+
+          sed -i "s/VERSION_PLACEHOLDER/$VERSION/g" product.wxs
+
+          candle -dSourceDir="dist/sql-editor" product.wxs files.wxs
+          light -sval product.wixobj files.wixobj -o sql-editor-installer.msi
+
+      - name: Podpisanie instalatora MSI
+        shell: pwsh
+        run: |
+          $signtool = (Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin\" -Filter signtool.exe -Recurse | Where-Object { $_.FullName -like "*x64*" } | Select-Object -Last 1).FullName
+          if (-not $signtool) {
+            $signtool = (Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin\" -Filter signtool.exe -Recurse | Select-Object -Last 1).FullName
+          }
+          Write-Host "Podpisywanie sql-editor-installer.msi..."
+          & $signtool sign /f "SQLEditorCert.pfx" /p "SQLEditorPass123!" /fd SHA256 /tr "http://timestamp.digicert.com" /td SHA256 "sql-editor-installer.msi"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Timestamp serwer niedostepny, podpisywanie bez znacznika czasu..."
+            & $signtool sign /f "SQLEditorCert.pfx" /p "SQLEditorPass123!" /fd SHA256 "sql-editor-installer.msi"
+          }
+
+      - name: Generowanie sum kontrolnych SHA256 dla Windows
+        shell: pwsh
+        run: |
+          Get-FileHash -Algorithm SHA256 sql-editor-installer.msi, sql-editor-windows-portable.zip | Format-List | Out-File -FilePath checksums-windows-sha256.txt
+
+      - name: Publikacja wydania Windows
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sql-editor-windows-portable.zip
+            sql-editor-installer.msi
+            checksums-windows-sha256.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # =======================================================
+  # 2. MACOS (.dmg oraz .pkg)
+  # =======================================================
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Pobierz kod
+        uses: actions/checkout@v4
+
+      - name: Konfiguracja Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Kompilacja w trybie Release
+        run: cargo build --release
+
+      - name: Przygotowanie pakietu SQL Editor.app
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          if [[ ! $VERSION =~ ^[0-9]+\.[0-9]+ ]]; then VERSION="0.5.2"; fi
+
+          APP_DIR="dist/SQL Editor.app"
+          mkdir -p "$APP_DIR/Contents/MacOS"
+          mkdir -p "$APP_DIR/Contents/Resources"
+
+          cp target/release/sql-editor "$APP_DIR/Contents/MacOS/sql-editor"
+          chmod +x "$APP_DIR/Contents/MacOS/sql-editor"
+
+          cp assets/icon.icns "$APP_DIR/Contents/Resources/icon.icns"
+
+          cat << EOF > "$APP_DIR/Contents/Info.plist"
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>sql-editor</string>
+              <key>CFBundleIconFile</key>
+              <string>icon.icns</string>
+              <key>CFBundleIdentifier</key>
+              <string>com.opensource.sqleditor</string>
+              <key>CFBundleName</key>
+              <string>SQL Editor</string>
+              <key>CFBundleDisplayName</key>
+              <string>SQL Editor</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>${VERSION}</string>
+              <key>CFBundleVersion</key>
+              <string>${VERSION}</string>
+              <key>LSMinimumSystemVersion</key>
+              <string>10.13</string>
+              <key>NSHighResolutionCapable</key>
+              <true/>
+          </dict>
+          </plist>
+          EOF
+
+          # Podpisanie ad-hoc pakietu aplikacji
+          codesign --force --deep --sign - "$APP_DIR"
+
+      - name: Budowanie instalatora systemowego (.pkg)
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          if [[ ! $VERSION =~ ^[0-9]+\.[0-9]+ ]]; then VERSION="0.5.2"; fi
+
+          mkdir -p pkg_root/payload
+          cp -R "dist/SQL Editor.app" pkg_root/payload/
+
+          mkdir -p pkg_root/scripts
+          cat << 'EOF' > pkg_root/scripts/postinstall
+          #!/bin/bash
+          TARGET_APP="/Applications/SQL Editor.app"
+          if [ -d "$TARGET_APP" ]; then
+              chown -R root:admin "$TARGET_APP" 2>/dev/null || true
+              chmod -R 755 "$TARGET_APP" 2>/dev/null || true
+              xattr -r -d com.apple.quarantine "$TARGET_APP" 2>/dev/null || true
+              xattr -cr "$TARGET_APP" 2>/dev/null || true
+          fi
+          if [ -e "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister" ]; then
+              /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f -R "$TARGET_APP" 2>/dev/null || true
+          fi
+          exit 0
+          EOF
+          chmod +x pkg_root/scripts/postinstall
+
+          pkgbuild --root pkg_root/payload \
+                   --install-location /Applications \
+                   --scripts pkg_root/scripts \
+                   --identifier com.opensource.sqleditor.pkg \
+                   --version "$VERSION" \
+                   sql-editor-macos-installer.pkg
+
+      - name: Tworzenie obrazu dysku DMG ze skryptem odblokowującym
+        run: |
+          mkdir dmg_root
+          cp -r "dist/SQL Editor.app" dmg_root/
+          ln -s /Applications dmg_root/Applications
+
+          cat << 'EOF' > dmg_root/Fix-macOS-Gatekeeper.command
+          #!/bin/bash
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          echo "=============================================="
+          echo "  SQL Editor - Odblokowywanie dla macOS"
+          echo "=============================================="
+          echo ""
+          TARGET=""
+          if [ -d "/Applications/SQL Editor.app" ]; then
+              TARGET="/Applications/SQL Editor.app"
+          elif [ -d "$DIR/SQL Editor.app" ]; then
+              TARGET="$DIR/SQL Editor.app"
+          fi
+
+          if [ -n "$TARGET" ]; then
+              echo "Usuwanie atrybutów kwarantanny z: $TARGET"
+              xattr -r -d com.apple.quarantine "$TARGET" 2>/dev/null || true
+              xattr -cr "$TARGET" 2>/dev/null || true
+              echo "Uruchamianie SQL Editor..."
+              open "$TARGET"
+              echo ""
+              echo "Gotowe! Możesz zamknąć to okno."
+          else
+              echo "Nie znaleziono SQL Editor.app w /Applications ani w tym obrazie."
+              echo "Najpierw przeciągnij SQL Editor do folderu Programy (Applications)."
+          fi
+          EOF
+          chmod +x dmg_root/Fix-macOS-Gatekeeper.command
+
+          hdiutil create -volname "SQL Editor" -srcfolder dmg_root -ov -format UDZO sql-editor-macos.dmg
+          shasum -a 256 sql-editor-macos-installer.pkg sql-editor-macos.dmg > checksums-macos-sha256.txt
+
+      - name: Publikacja wydania macOS
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            sql-editor-macos-installer.pkg
+            sql-editor-macos.dmg
+            checksums-macos-sha256.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # =======================================================
+  # 3. LINUX (.deb, .rpm oraz .AppImage)
+  # =======================================================
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pobierz kod
+        uses: actions/checkout@v4
+
+      - name: Instalacja zależności systemowych
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ruby ruby-dev rubygems build-essential rpm libfuse2 file libssl-dev pkg-config libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libgtk-3-dev
+          sudo gem install --no-document fpm
+
+      - name: Konfiguracja Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Kompilacja w trybie Release
+        run: cargo build --release
+
+      - name: Budowanie pakietów .deb oraz .rpm
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          if [[ -z "$VERSION" ]]; then VERSION="0.5.2"; fi
+
+          mkdir -p pkg/usr/bin
+          cp target/release/sql-editor pkg/usr/bin/sql-editor
+          chmod +x pkg/usr/bin/sql-editor
+
+          mkdir -p pkg/usr/share/applications
+          mkdir -p pkg/usr/share/icons/hicolor/256x256/apps
+          cp assets/icon.png pkg/usr/share/icons/hicolor/256x256/apps/sql-editor.png
+
+          cat << 'EOF' > pkg/usr/share/applications/sql-editor.desktop
+          [Desktop Entry]
+          Type=Application
+          Name=SQL Editor
+          GenericName=SQL Editor
+          Comment=Lightweight, cross-platform SQL editor and database client
+          Exec=/usr/bin/sql-editor
+          Icon=sql-editor
+          Categories=Development;Database;
+          Terminal=false
+          StartupNotify=true
+          EOF
+
+          fpm -s dir -t deb -n sql-editor -v "$VERSION" \
+            --vendor "SQL Editor" \
+            --maintainer "SQL Editor <contact@sqleditor.local>" \
+            --description "SQL Editor - Fast Lightweight Database Client" \
+            --license "MIT" \
+            -C pkg --prefix / -p sql-editor_${VERSION}_amd64.deb
+
+          fpm -s dir -t rpm -n sql-editor -v "$VERSION" \
+            --vendor "SQL Editor" \
+            --maintainer "SQL Editor <contact@sqleditor.local>" \
+            --description "SQL Editor - Fast Lightweight Database Client" \
+            --license "MIT" \
+            -C pkg --prefix / -p sql-editor-${VERSION}-1.x86_64.rpm
+
+      - name: Budowanie uniwersalnego pakietu .AppImage
+        run: |
+          mkdir -p AppDir/usr/bin
+          mkdir -p AppDir/usr/share/applications
+          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+
+          cp target/release/sql-editor AppDir/usr/bin/sql-editor
+          chmod +x AppDir/usr/bin/sql-editor
+
+          cat << 'EOF' > AppDir/sql-editor.desktop
+          [Desktop Entry]
+          Type=Application
+          Name=SQL Editor
+          Exec=sql-editor
+          Icon=sql-editor
+          Categories=Development;Database;
+          Terminal=false
+          EOF
+          cp AppDir/sql-editor.desktop AppDir/usr/share/applications/
+          cp assets/icon.png AppDir/usr/share/icons/hicolor/256x256/apps/sql-editor.png
+          cp assets/icon.png AppDir/sql-editor.png
+          ln -sf sql-editor.png AppDir/.DirIcon
+
+          cat << 'EOF' > AppDir/AppRun
+          #!/bin/sh
+          SELF=$(readlink -f "$0")
+          HERE=${SELF%/*}
+          exec "${HERE}/usr/bin/sql-editor" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+
+          curl -sL https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -o appimagetool
+          chmod +x appimagetool
+          ./appimagetool --appimage-extract
+
+          export ARCH=x86_64
+          ./squashfs-root/AppRun --no-appstream AppDir sql-editor-x86_64.AppImage
+          sha256sum *.deb *.rpm *.AppImage > checksums-linux-sha256.txt
+
+      - name: Publikacja pakietów Linux
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.deb
+            *.rpm
+            *.AppImage
+            checksums-linux-sha256.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
