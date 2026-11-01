@@ -89,8 +89,10 @@ fn test_theme_colors() {
 #[test]
 fn test_parse_version() {
     assert_eq!(parse_version("v1.2.3"), (1, 2, 3));
+    assert_eq!(parse_version("0.5.0"), (0, 5, 0));
     assert_eq!(parse_version("0.5.2"), (0, 5, 2));
     assert!(parse_version("v0.5.3") > parse_version("v0.5.2"));
+    assert_eq!(sql_editor::version::VERSION, "0.5.0");
 }
 
 #[test]
@@ -160,4 +162,33 @@ fn test_sqlite_query_and_schema() {
     let xlsx_file = tmp_dir.path().join("out.xlsx");
     export_xlsx(&xlsx_file, &cols, &received_rows).unwrap();
     assert!(xlsx_file.exists());
+
+    // Test multiple queries splitting and independent execution
+    let multi_sql = "SELECT id, name FROM employees WHERE id = 1; SELECT salary FROM employees WHERE id = 2;";
+    let stmts = split_sql_statements(multi_sql);
+    assert_eq!(stmts.len(), 2);
+    assert_eq!(stmts[0], "SELECT id, name FROM employees WHERE id = 1");
+    assert_eq!(stmts[1], "SELECT salary FROM employees WHERE id = 2");
+
+    let mut q1_cols = None;
+    let mut q1_rows = Vec::new();
+    execute_sqlite_stream(db_str, &stmts[0], 100, |cols, rows| {
+        if let Some(c) = cols { q1_cols = Some(c); }
+        q1_rows.extend(rows);
+    }).unwrap();
+
+    let mut q2_cols = None;
+    let mut q2_rows = Vec::new();
+    execute_sqlite_stream(db_str, &stmts[1], 100, |cols, rows| {
+        if let Some(c) = cols { q2_cols = Some(c); }
+        q2_rows.extend(rows);
+    }).unwrap();
+
+    assert_eq!(q1_cols.unwrap(), vec!["id", "name"]);
+    assert_eq!(q1_rows.len(), 1);
+    assert_eq!(q1_rows[0], vec![Some("1".to_string()), Some("Alice".to_string())]);
+
+    assert_eq!(q2_cols.unwrap(), vec!["salary"]);
+    assert_eq!(q2_rows.len(), 1);
+    assert_eq!(q2_rows[0], vec![None]);
 }

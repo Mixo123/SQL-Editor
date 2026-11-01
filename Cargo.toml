@@ -1,6 +1,6 @@
 [package]
 name = "sql-editor"
-version = "0.5.2"
+version = "0.5.0"
 edition = "2021"
 description = "A fast, lightweight, and cross-platform SQL editor built with Rust"
 

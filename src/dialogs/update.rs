@@ -101,12 +101,31 @@ impl UpdateDialog {
                     }
                 } else {
                     ui.vertical_centered(|ui| {
-                        ui.add_space(16.0);
+                        ui.add_space(12.0);
                         ui.label(RichText::new("✓").size(32.0).color(Color32::from_rgb(100, 255, 100)));
-                        ui.label(RichText::new(format!("Używasz najnowszej wersji SQL Editor (v{}).", res.current_version)).size(13.0));
-                        ui.label("Brak nowszych aktualizacji.");
-                        ui.add_space(16.0);
+                        ui.label(
+                            RichText::new("Twoja wersja programu jest aktualna!")
+                                .size(15.0)
+                                .strong()
+                                .color(theme.c_fg()),
+                        );
+                        ui.add_space(8.0);
                     });
+
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Zainstalowana wersja:").strong());
+                        ui.label(format!("v{}", res.current_version));
+                        ui.add_space(16.0);
+                        if !res.latest_version.is_empty() {
+                            ui.label(RichText::new("Najnowsza na GitHubie:").strong());
+                            ui.label(
+                                RichText::new(format!("v{}", res.latest_version))
+                                    .color(Color32::from_rgb(100, 255, 100)),
+                            );
+                        }
+                    });
+                    ui.label("Nie znaleziono nowszych wydań.");
+                    ui.add_space(12.0);
                 }
 
                 ui.separator();

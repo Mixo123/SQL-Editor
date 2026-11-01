@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use egui::{
-    menu, Align, Align2, Color32, Context, FontId, Key, Layout, Pos2, Rect,
+    menu, Align, Align2, Color32, Context, FontId, Key, Layout, Modifiers, Pos2, Rect,
     RichText, ScrollArea, Sense, Stroke, TextStyle, Ui, Vec2,
 };
 use egui_extras::{Column, TableBuilder};
@@ -49,10 +49,11 @@ pub struct QueryResult {
 }
 
 pub enum QueryMsg {
-    Header(Vec<String>),
-    Batch(Vec<Vec<Option<String>>>),
-    Finished(f64),
-    Error(String),
+    Header(usize, Vec<String>),
+    Batch(usize, Vec<Vec<Option<String>>>),
+    Finished(usize, f64),
+    Error(usize, String),
+    AllFinished(f64),
 }
 
 pub struct SqlEditorApp {
@@ -339,29 +340,33 @@ impl SqlEditorApp {
 
         thread::spawn(move || {
             let start = Instant::now();
-            for stmt in &statements {
+            for (index, stmt) in statements.iter().enumerate() {
                 let tx_clone = tx.clone();
+                let stmt_start = Instant::now();
                 let res = stream_query(
                     &conn_meta,
                     stmt,
                     MAX_FETCH_ROWS,
                     |cols, rows| {
                         if let Some(c) = cols {
-                            let _ = tx_clone.send(QueryMsg::Header(c));
+                            let _ = tx_clone.send(QueryMsg::Header(index, c));
                         }
                         if !rows.is_empty() {
-                            let _ = tx_clone.send(QueryMsg::Batch(rows));
+                            let _ = tx_clone.send(QueryMsg::Batch(index, rows));
                         }
                     },
                 );
 
                 if let Err(e) = res {
-                    let _ = tx.send(QueryMsg::Error(e));
+                    let _ = tx.send(QueryMsg::Error(index, e));
                     break;
+                } else {
+                    let elapsed = stmt_start.elapsed().as_secs_f64();
+                    let _ = tx.send(QueryMsg::Finished(index, elapsed));
                 }
             }
-            let elapsed = start.elapsed().as_secs_f64();
-            let _ = tx.send(QueryMsg::Finished(elapsed));
+            let total_elapsed = start.elapsed().as_secs_f64();
+            let _ = tx.send(QueryMsg::AllFinished(total_elapsed));
         });
     }
 
@@ -369,21 +374,26 @@ impl SqlEditorApp {
         let mut finished = false;
         if let Some(ref rx) = self.query_rx {
             while let Ok(msg) = rx.try_recv() {
-                let curr_res = self.query_results.get_mut(self.active_result_idx);
                 match msg {
-                    QueryMsg::Header(cols) => {
-                        if let Some(res) = curr_res {
+                    QueryMsg::Header(idx, cols) => {
+                        if let Some(res) = self.query_results.get_mut(idx) {
                             res.columns = cols;
                         }
                     }
-                    QueryMsg::Batch(rows) => {
-                        if let Some(res) = curr_res {
+                    QueryMsg::Batch(idx, rows) => {
+                        if let Some(res) = self.query_results.get_mut(idx) {
                             res.fetched_count += rows.len();
                             res.rows.extend(rows);
                         }
                     }
-                    QueryMsg::Error(err) => {
-                        if let Some(res) = curr_res {
+                    QueryMsg::Finished(idx, elapsed) => {
+                        if let Some(res) = self.query_results.get_mut(idx) {
+                            res.finished = true;
+                            res.elapsed_secs = elapsed;
+                        }
+                    }
+                    QueryMsg::Error(idx, err) => {
+                        if let Some(res) = self.query_results.get_mut(idx) {
                             res.error = Some(err.clone());
                             res.columns = vec!["Error".to_string()];
                             res.rows = vec![vec![Some(err)]];
@@ -391,18 +401,25 @@ impl SqlEditorApp {
                         }
                         self.status_text = "Błąd wykonania zapytania".to_string();
                     }
-                    QueryMsg::Finished(elapsed) => {
-                        if let Some(res) = curr_res {
-                            res.finished = true;
-                            res.elapsed_secs = elapsed;
+                    QueryMsg::AllFinished(elapsed) => {
+                        finished = true;
+                        let total_queries = self.query_results.len();
+                        let total_rows: usize = self.query_results.iter().map(|r| r.fetched_count).sum();
+                        if total_queries == 1 {
+                            if let Some(res) = self.query_results.first() {
+                                self.status_text = format!(
+                                    "{} row(s) • {} col(s) • {:.2}s",
+                                    res.fetched_count,
+                                    res.columns.len(),
+                                    elapsed
+                                );
+                            }
+                        } else {
                             self.status_text = format!(
-                                "{} row(s) • {} col(s) • {:.2}s",
-                                res.fetched_count,
-                                res.columns.len(),
-                                elapsed
+                                "Wykonano {} zapytań • Łącznie {} wierszy • {:.2}s",
+                                total_queries, total_rows, elapsed
                             );
                         }
-                        finished = true;
                     }
                 }
             }
@@ -461,6 +478,7 @@ impl SqlEditorApp {
             }
         }
         self.show_autocomplete = false;
+        ctx.memory_mut(|m| m.request_focus(text_edit_id));
     }
 
     pub fn export_active_result(&mut self, format_type: &str) {
@@ -518,14 +536,20 @@ impl eframe::App for SqlEditorApp {
         // Autocomplete keyboard handling
         let mut do_insert_autocomplete = false;
         if self.show_autocomplete && !self.suggestions.is_empty() {
-            ctx.input(|i| {
+            ctx.input_mut(|i| {
                 if i.key_pressed(Key::ArrowDown) {
+                    i.consume_key(Modifiers::NONE, Key::ArrowDown);
                     self.selected_suggestion = (self.selected_suggestion + 1) % self.suggestions.len();
                 } else if i.key_pressed(Key::ArrowUp) {
+                    i.consume_key(Modifiers::NONE, Key::ArrowUp);
                     self.selected_suggestion = (self.selected_suggestion + self.suggestions.len() - 1) % self.suggestions.len();
-                } else if (i.key_pressed(Key::Enter) && !i.modifiers.ctrl && !i.modifiers.command) || i.key_pressed(Key::Tab) {
+                } else if i.key_pressed(Key::Tab) || (i.key_pressed(Key::Enter) && !i.modifiers.ctrl && !i.modifiers.command) {
+                    i.consume_key(Modifiers::NONE, Key::Tab);
+                    i.consume_key(Modifiers::SHIFT, Key::Tab);
+                    i.consume_key(Modifiers::NONE, Key::Enter);
                     do_insert_autocomplete = true;
                 } else if i.key_pressed(Key::Escape) {
+                    i.consume_key(Modifiers::NONE, Key::Escape);
                     self.show_autocomplete = false;
                 }
             });
@@ -864,16 +888,36 @@ impl eframe::App for SqlEditorApp {
                         ui.fonts(|f| f.layout_job(job))
                     };
 
+                    let editor_bg = theme.c_bg();
+                    let line_height = ui.fonts(|f| f.row_height(&font_id)).max(14.0);
+                    let available_height = ui.available_height();
+                    let available_rows = ((available_height / line_height).floor() as usize).max(6);
+
                     let text_edit = egui::TextEdit::multiline(&mut content_to_edit)
                         .id(text_edit_id)
                         .font(TextStyle::Monospace)
                         .desired_width(f32::INFINITY)
-                        .desired_rows(14)
+                        .desired_rows(available_rows)
+                        .frame(false)
+                        .lock_focus(true)
                         .layouter(&mut layouter);
 
-                    let response = ScrollArea::vertical()
-                        .id_salt("editor_scroll_area")
-                        .show(ui, |ui| ui.add(text_edit));
+                    let editor_frame = egui::Frame::none()
+                        .fill(editor_bg)
+                        .inner_margin(egui::Margin::symmetric(8.0, 6.0));
+
+                    let frame_res = editor_frame.show(ui, |ui| {
+                        ui.visuals_mut().extreme_bg_color = editor_bg;
+                        ScrollArea::vertical()
+                            .id_salt("editor_scroll_area")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| ui.add(text_edit))
+                    });
+
+                    let response = frame_res.inner.inner;
+                    if frame_res.response.interact(Sense::click()).clicked() && !response.has_focus() {
+                        ctx.memory_mut(|m| m.request_focus(text_edit_id));
+                    }
 
                     let cursor_idx = egui::text_edit::TextEditState::load(ui.ctx(), text_edit_id)
                         .and_then(|s| s.cursor.char_range())
@@ -882,7 +926,7 @@ impl eframe::App for SqlEditorApp {
 
                     let text_before: String = content_to_edit.chars().take(cursor_idx).collect();
 
-                    if response.inner.changed() {
+                    if response.changed() {
                         if let Some(tab) = self.active_tab_mut() {
                             tab.content = content_to_edit.clone();
                             tab.modified = true;
@@ -1021,11 +1065,32 @@ impl eframe::App for SqlEditorApp {
                         ui.horizontal(|ui| {
                             let result_count = self.query_results.len();
                             for i in 0..result_count {
-                                let title = self.query_results[i].title.clone();
                                 let is_active = self.active_result_idx == i;
-                                if ui.selectable_label(is_active, &title).clicked() {
-                                    self.active_result_idx = i;
-                                }
+                                let res = &self.query_results[i];
+                                let label_text = if res.error.is_some() {
+                                    format!("⚠️ {} (błąd)", res.title)
+                                } else if res.finished {
+                                    format!("{} ({} w.)", res.title, res.fetched_count)
+                                } else {
+                                    res.title.clone()
+                                };
+
+                                let bg = if is_active {
+                                    theme.c_bg()
+                                } else {
+                                    theme.c_bg_header()
+                                };
+
+                                egui::Frame::none()
+                                    .fill(bg)
+                                    .inner_margin(Vec2::new(8.0, 4.0))
+                                    .rounding(egui::Rounding { nw: 4.0, ne: 4.0, sw: 0.0, se: 0.0 })
+                                    .show(ui, |ui| {
+                                        if ui.selectable_label(is_active, RichText::new(label_text).color(theme.c_fg()).strong()).clicked() {
+                                            self.active_result_idx = i;
+                                            self.selected_table_cell = None;
+                                        }
+                                    });
                             }
 
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
