@@ -114,19 +114,62 @@ impl SqlEditorApp {
         let theme = get_theme(&settings.theme_name, &settings.custom_theme_colors);
         let connections = load_connections();
 
-        let initial_tab = EditorTab {
-            id: 1,
-            name: format!("{} 1", tr("tab_untitled")),
-            path: None,
-            content: "-- Write your SQL query here\nSELECT 1;\n".to_string(),
-            modified: false,
+        // Restore session or fallback to default initial tab
+        let saved_session = crate::session::load_session();
+        let (initial_tabs, initial_active_id, next_id, initial_height, saved_conn) = if let Some(sess) = saved_session {
+            if !sess.tabs.is_empty() {
+                let mut restored = Vec::new();
+                let mut nid = 1;
+                for s in sess.tabs {
+                    let content = if let Some(ref p) = s.path {
+                        if s.modified {
+                            s.content
+                        } else if let Ok(disk_c) = fs::read_to_string(p) {
+                            disk_c
+                        } else {
+                            s.content
+                        }
+                    } else {
+                        s.content
+                    };
+
+                    restored.push(EditorTab {
+                        id: nid,
+                        name: s.name,
+                        path: s.path,
+                        content,
+                        modified: s.modified,
+                    });
+                    nid += 1;
+                }
+                let active_id = restored.get(sess.active_tab_index).map(|t| t.id).unwrap_or(1);
+                (restored, active_id, nid, sess.editor_height.unwrap_or(380.0), sess.active_conn_name)
+            } else {
+                let initial_tab = EditorTab {
+                    id: 1,
+                    name: format!("{} 1", tr("tab_untitled")),
+                    path: None,
+                    content: "-- Write your SQL query here\nSELECT 1;\n".to_string(),
+                    modified: false,
+                };
+                (vec![initial_tab], 1, 2, 380.0, None)
+            }
+        } else {
+            let initial_tab = EditorTab {
+                id: 1,
+                name: format!("{} 1", tr("tab_untitled")),
+                path: None,
+                content: "-- Write your SQL query here\nSELECT 1;\n".to_string(),
+                modified: false,
+            };
+            (vec![initial_tab], 1, 2, 380.0, None)
         };
 
         let mut app = Self {
-            tabs: vec![initial_tab],
-            active_tab_id: 1,
-            next_tab_id: 2,
-            editor_height: 380.0,
+            tabs: initial_tabs,
+            active_tab_id: initial_active_id,
+            next_tab_id: next_id,
+            editor_height: initial_height,
             connections,
             active_conn_name: None,
             schema_cache: HashMap::new(),
@@ -160,9 +203,12 @@ impl SqlEditorApp {
             app.update_rx = Some(check_for_updates_async());
         }
 
-        // Auto select first connection if available
-        let first_conn = app.connections.first().map(|c| c.name.clone());
-        if let Some(name) = first_conn {
+        // Select connection: from saved session if valid, or first available
+        let conn_to_select = saved_conn
+            .filter(|name| app.connections.iter().any(|c| c.name == *name))
+            .or_else(|| app.connections.first().map(|c| c.name.clone()));
+
+        if let Some(name) = conn_to_select {
             app.select_connection(&name);
         }
 
@@ -180,11 +226,40 @@ impl SqlEditorApp {
         }
     }
 
+    pub fn save_session(&self) {
+        let active_idx = self
+            .tabs
+            .iter()
+            .position(|t| t.id == self.active_tab_id)
+            .unwrap_or(0);
+
+        let saved_tabs = self
+            .tabs
+            .iter()
+            .map(|t| crate::session::SavedTab {
+                name: t.name.clone(),
+                path: t.path.clone(),
+                content: t.content.clone(),
+                modified: t.modified,
+            })
+            .collect();
+
+        let session = crate::session::AppSession {
+            active_conn_name: self.active_conn_name.clone(),
+            active_tab_index: active_idx,
+            editor_height: Some(self.editor_height),
+            tabs: saved_tabs,
+        };
+
+        crate::session::save_session(&session);
+    }
+
     pub fn select_connection(&mut self, name: &str) {
         self.active_conn_name = Some(name.to_string());
         if !self.schema_cache.contains_key(name) {
             self.fetch_schema(name);
         }
+        self.save_session();
     }
 
     pub fn new_tab(&mut self) {
@@ -198,6 +273,7 @@ impl SqlEditorApp {
             modified: false,
         });
         self.active_tab_id = id;
+        self.save_session();
     }
 
     pub fn close_tab(&mut self, id: usize) {
@@ -213,6 +289,7 @@ impl SqlEditorApp {
                 let new_idx = idx.min(self.tabs.len() - 1);
                 self.active_tab_id = self.tabs[new_idx].id;
             }
+            self.save_session();
         }
     }
 
@@ -247,6 +324,7 @@ impl SqlEditorApp {
                     modified: false,
                 });
                 self.active_tab_id = id;
+                self.save_session();
             }
         }
     }
@@ -257,6 +335,7 @@ impl SqlEditorApp {
             if fs::write(path, &tab.content).is_ok() {
                 tab.modified = false;
                 self.status_text = format!("Zapisano {}", path.display());
+                self.save_session();
             }
         } else {
             self.save_file_as();
@@ -278,6 +357,7 @@ impl SqlEditorApp {
                 tab.path = Some(path.clone());
                 tab.modified = false;
                 self.status_text = format!("Zapisano {}", path.display());
+                self.save_session();
             }
         }
     }
@@ -527,6 +607,10 @@ impl SqlEditorApp {
 
 impl eframe::App for SqlEditorApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.save_session();
+        }
+
         self.poll_query_results();
 
         let theme = self.theme.clone();
@@ -812,6 +896,7 @@ impl eframe::App for SqlEditorApp {
                             ui.horizontal(|ui| {
                                 if ui.selectable_label(is_active, label_text).clicked() {
                                     self.active_tab_id = id;
+                                    self.save_session();
                                 }
                             });
                         }
@@ -857,6 +942,7 @@ impl eframe::App for SqlEditorApp {
                                     ui.horizontal(|ui| {
                                         if ui.selectable_label(is_active, RichText::new(title).color(theme.c_fg())).clicked() {
                                             self.active_tab_id = id;
+                                            self.save_session();
                                         }
                                         if ui.small_button("×").clicked() {
                                             self.close_tab(id);
@@ -917,6 +1003,9 @@ impl eframe::App for SqlEditorApp {
                     let response = frame_res.inner.inner;
                     if frame_res.response.interact(Sense::click()).clicked() && !response.has_focus() {
                         ctx.memory_mut(|m| m.request_focus(text_edit_id));
+                    }
+                    if response.lost_focus() {
+                        self.save_session();
                     }
 
                     if response.changed() {
@@ -1044,6 +1133,9 @@ impl eframe::App for SqlEditorApp {
                 if splitter_resp.dragged() {
                     self.editor_height += splitter_resp.drag_delta().y;
                     self.editor_height = self.editor_height.clamp(120.0, (total_height - 80.0).max(120.0));
+                }
+                if splitter_resp.drag_stopped() {
+                    self.save_session();
                 }
 
                 if splitter_resp.hovered() || splitter_resp.dragged() {
@@ -1327,10 +1419,21 @@ impl eframe::App for SqlEditorApp {
                         let new_idx = idx.min(self.tabs.len() - 1);
                         self.active_tab_id = self.tabs[new_idx].id;
                     }
+                    self.save_session();
                 }
             } else if cancel_close {
                 self.confirm_close_dirty = None;
             }
         }
+    }
+
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        self.save_session();
+    }
+}
+
+impl Drop for SqlEditorApp {
+    fn drop(&mut self) {
+        self.save_session();
     }
 }

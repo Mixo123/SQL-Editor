@@ -9,6 +9,7 @@ pub mod dialogs;
 pub mod export;
 pub mod highlighter;
 pub mod i18n;
+pub mod session;
 pub mod theme;
 pub mod updater;
 pub mod version;

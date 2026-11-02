@@ -28,6 +28,10 @@ pub fn key_file() -> PathBuf {
     app_dir().join(".key")
 }
 
+pub fn session_file() -> PathBuf {
+    app_dir().join("session.json")
+}
+
 pub fn ensure_app_dir() {
     let dir = app_dir();
     let _ = fs::create_dir_all(&dir);

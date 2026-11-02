@@ -230,3 +230,47 @@ fn test_sqlite_query_and_schema() {
     assert_eq!(q2_rows.len(), 1);
     assert_eq!(q2_rows[0], vec![None]);
 }
+
+#[test]
+fn test_session_save_and_load() {
+    use sql_editor::session::{load_session_from, save_session_to, AppSession, SavedTab};
+    use tempfile::tempdir;
+
+    let tmp = tempdir().unwrap();
+    let session_path = tmp.path().join("session.json");
+
+    let session = AppSession {
+        active_conn_name: Some("Production SQLite".to_string()),
+        active_tab_index: 1,
+        editor_height: Some(420.0),
+        tabs: vec![
+            SavedTab {
+                name: "query1.sql".to_string(),
+                path: Some(tmp.path().join("query1.sql")),
+                content: "SELECT * FROM users;".to_string(),
+                modified: false,
+            },
+            SavedTab {
+                name: "Bez tytułu 2".to_string(),
+                path: None,
+                content: "SELECT COUNT(*) FROM orders;".to_string(),
+                modified: true,
+            },
+        ],
+    };
+
+    save_session_to(&session, &session_path);
+    assert!(session_path.exists());
+
+    let loaded = load_session_from(&session_path).expect("Failed to load saved session");
+    assert_eq!(loaded.active_conn_name, Some("Production SQLite".to_string()));
+    assert_eq!(loaded.active_tab_index, 1);
+    assert_eq!(loaded.editor_height, Some(420.0));
+    assert_eq!(loaded.tabs.len(), 2);
+    assert_eq!(loaded.tabs[0].name, "query1.sql");
+    assert_eq!(loaded.tabs[0].content, "SELECT * FROM users;");
+    assert!(!loaded.tabs[0].modified);
+    assert_eq!(loaded.tabs[1].name, "Bez tytułu 2");
+    assert_eq!(loaded.tabs[1].content, "SELECT COUNT(*) FROM orders;");
+    assert!(loaded.tabs[1].modified);
+}
