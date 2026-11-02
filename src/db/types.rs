@@ -125,86 +125,89 @@ pub fn split_sql_statements(sql: &str) -> Vec<String> {
     let mut start = 0;
     let mut index = 0;
     let mut has_content = false;
-    let bytes = sql.as_bytes();
+    let len = sql.len();
 
-    while index < bytes.len() {
-        if sql[index..].starts_with("--") || bytes[index] == b'#' {
-            let newline = sql[index..].find('\n');
-            index = match newline {
-                Some(nl) => index + nl + 1,
-                None => bytes.len(),
-            };
+    while index < len {
+        let remainder = &sql[index..];
+        if remainder.starts_with("--") || remainder.starts_with('#') {
+            if let Some(nl) = remainder.find('\n') {
+                index += nl + 1;
+            } else {
+                break;
+            }
             continue;
         }
-        if sql[index..].starts_with("/*") {
-            let end = sql[index + 2..].find("*/");
-            index = match end {
-                Some(e) => index + 2 + e + 2,
-                None => bytes.len(),
-            };
+        if remainder.starts_with("/*") {
+            if let Some(e) = remainder[2..].find("*/") {
+                index += 2 + e + 2;
+            } else {
+                break;
+            }
             continue;
         }
 
-        let char = bytes[index] as char;
-        if char == '$' {
+        let ch = remainder.chars().next().unwrap();
+        if ch == '$' {
             let re_delim = Regex::new(r"^\$[A-Za-z_0-9]*\$").unwrap();
-            if let Some(m) = re_delim.find(&sql[index..]) {
+            if let Some(m) = re_delim.find(remainder) {
                 has_content = true;
                 let token = m.as_str();
                 let end = sql[index + token.len()..].find(token);
                 index = match end {
                     Some(e) => index + token.len() + e + token.len(),
-                    None => bytes.len(),
+                    None => len,
                 };
                 continue;
             }
         }
-        if char == '\'' || char == '"' || char == '`' {
+        if ch == '\'' || ch == '"' || char_is_backtick(ch) {
             has_content = true;
-            let quote = char;
-            index += 1;
-            while index < bytes.len() {
-                if bytes[index] == b'\\' && quote == '\'' {
+            let quote = ch;
+            index += quote.len_utf8();
+            while index < len {
+                let s = &sql[index..];
+                if quote == '\'' && s.starts_with("\\'") {
                     index += 2;
-                } else if bytes[index] as char == quote {
-                    if index + 1 < bytes.len() && bytes[index + 1] as char == quote {
-                        index += 2;
-                    } else {
-                        index += 1;
-                        break;
-                    }
+                } else if quote == '\'' && s.starts_with("''") {
+                    index += 2;
+                } else if s.starts_with(quote) {
+                    index += quote.len_utf8();
+                    break;
                 } else {
-                    index += 1;
+                    let next_ch = s.chars().next().unwrap();
+                    index += next_ch.len_utf8();
                 }
             }
             continue;
         }
-        if char == '[' {
+        if ch == '[' {
             has_content = true;
             index += 1;
-            while index < bytes.len() {
-                if index + 1 < bytes.len() && &sql[index..index + 2] == "]]" {
+            while index < len {
+                let s = &sql[index..];
+                if s.starts_with("]]") {
                     index += 2;
-                } else if bytes[index] as char == ']' {
+                } else if s.starts_with(']') {
                     index += 1;
                     break;
                 } else {
-                    index += 1;
+                    let next_ch = s.chars().next().unwrap();
+                    index += next_ch.len_utf8();
                 }
             }
             continue;
         }
-        if char == ';' {
+        if ch == ';' {
             let stmt = sql[start..index].trim();
             if has_content && !stmt.is_empty() {
                 statements.push(stmt.to_string());
             }
             start = index + 1;
             has_content = false;
-        } else if !char.is_whitespace() {
+        } else if !ch.is_whitespace() {
             has_content = true;
         }
-        index += 1;
+        index += ch.len_utf8();
     }
 
     let stmt = sql[start..].trim();
@@ -215,95 +218,103 @@ pub fn split_sql_statements(sql: &str) -> Vec<String> {
     statements
 }
 
+#[inline]
+fn char_is_backtick(c: char) -> bool {
+    c == '`'
+}
+
 pub fn is_unbounded_select(sql: &str) -> bool {
     let mut keywords = Vec::new();
     let mut depth: i32 = 0;
     let mut index = 0;
-    let bytes = sql.as_bytes();
+    let len = sql.len();
     let word_re = Regex::new(r"^[A-Za-z_][A-Za-z_0-9$]*").unwrap();
 
-    while index < bytes.len() {
-        if sql[index..].starts_with("--") || bytes[index] == b'#' {
-            let newline = sql[index..].find('\n');
-            index = match newline {
-                Some(nl) => index + nl + 1,
-                None => bytes.len(),
-            };
+    while index < len {
+        let remainder = &sql[index..];
+        if remainder.starts_with("--") || remainder.starts_with('#') {
+            if let Some(nl) = remainder.find('\n') {
+                index += nl + 1;
+            } else {
+                break;
+            }
             continue;
         }
-        if sql[index..].starts_with("/*") {
-            let end = sql[index + 2..].find("*/");
-            index = match end {
-                Some(e) => index + 2 + e + 2,
-                None => bytes.len(),
-            };
+        if remainder.starts_with("/*") {
+            if let Some(e) = remainder[2..].find("*/") {
+                index += 2 + e + 2;
+            } else {
+                break;
+            }
             continue;
         }
 
-        let char = bytes[index] as char;
-        if char == '$' {
+        let ch = remainder.chars().next().unwrap();
+        if ch == '$' {
             let re_delim = Regex::new(r"^\$[A-Za-z_0-9]*\$").unwrap();
-            if let Some(m) = re_delim.find(&sql[index..]) {
+            if let Some(m) = re_delim.find(remainder) {
                 let token = m.as_str();
                 let end = sql[index + token.len()..].find(token);
                 index = match end {
                     Some(e) => index + token.len() + e + token.len(),
-                    None => bytes.len(),
+                    None => len,
                 };
                 continue;
             }
         }
-        if char == '\'' || char == '"' || char == '`' {
-            let quote = char;
-            index += 1;
-            while index < bytes.len() {
-                if bytes[index] == b'\\' && quote == '\'' {
+        if ch == '\'' || ch == '"' || char_is_backtick(ch) {
+            let quote = ch;
+            index += quote.len_utf8();
+            while index < len {
+                let s = &sql[index..];
+                if quote == '\'' && s.starts_with("\\'") {
                     index += 2;
-                } else if bytes[index] as char == quote {
-                    if index + 1 < bytes.len() && bytes[index + 1] as char == quote {
-                        index += 2;
-                    } else {
-                        index += 1;
-                        break;
-                    }
+                } else if quote == '\'' && s.starts_with("''") {
+                    index += 2;
+                } else if s.starts_with(quote) {
+                    index += quote.len_utf8();
+                    break;
                 } else {
-                    index += 1;
+                    let next_ch = s.chars().next().unwrap();
+                    index += next_ch.len_utf8();
                 }
             }
             continue;
         }
-        if char == '[' {
+        if ch == '[' {
             index += 1;
-            while index < bytes.len() {
-                if index + 1 < bytes.len() && &sql[index..index + 2] == "]]" {
+            while index < len {
+                let s = &sql[index..];
+                if s.starts_with("]]") {
                     index += 2;
-                } else if bytes[index] as char == ']' {
+                } else if s.starts_with(']') {
                     index += 1;
                     break;
                 } else {
-                    index += 1;
+                    let next_ch = s.chars().next().unwrap();
+                    index += next_ch.len_utf8();
                 }
             }
             continue;
         }
-        if char == '(' {
+        if ch == '(' {
             depth += 1;
             index += 1;
             continue;
         }
-        if char == ')' {
+        if ch == ')' {
             depth = (depth - 1).max(0);
             index += 1;
             continue;
         }
 
-        if let Some(m) = word_re.find(&sql[index..]) {
+        if let Some(m) = word_re.find(remainder) {
             if depth == 0 {
                 keywords.push(m.as_str().to_uppercase());
             }
             index += m.len();
         } else {
-            index += 1;
+            index += ch.len_utf8();
         }
     }
 

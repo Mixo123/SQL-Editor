@@ -919,21 +919,28 @@ impl eframe::App for SqlEditorApp {
                         ctx.memory_mut(|m| m.request_focus(text_edit_id));
                     }
 
-                    let cursor_idx = egui::text_edit::TextEditState::load(ui.ctx(), text_edit_id)
-                        .and_then(|s| s.cursor.char_range())
-                        .map(|r| r.primary.index)
-                        .unwrap_or(content_to_edit.len());
-
-                    let text_before: String = content_to_edit.chars().take(cursor_idx).collect();
-
                     if response.changed() {
                         if let Some(tab) = self.active_tab_mut() {
                             tab.content = content_to_edit.clone();
                             tab.modified = true;
                         }
 
-                        // Trigger Autocomplete
+                        // Trigger Autocomplete (safely bounded for large text)
                         if self.settings.autocomplete {
+                            let cursor_idx = egui::text_edit::TextEditState::load(ui.ctx(), text_edit_id)
+                                .and_then(|s| s.cursor.char_range())
+                                .map(|r| r.primary.index)
+                                .unwrap_or(content_to_edit.len());
+
+                            let char_count = content_to_edit.chars().count();
+                            let safe_cursor = cursor_idx.min(char_count);
+                            let start_char = safe_cursor.saturating_sub(3000);
+                            let text_before: String = content_to_edit
+                                .chars()
+                                .skip(start_char)
+                                .take(safe_cursor - start_char)
+                                .collect();
+
                             let empty_schema = HashMap::new();
                             let schema = self.active_conn_name
                                 .as_deref()
@@ -1114,108 +1121,113 @@ impl eframe::App for SqlEditorApp {
                         ui.separator();
                     }
 
-                    // Results Table with Virtual Scrolling
+                    // Results Table with Virtual Scrolling and Horizontal Scrollbar
                     if let Some(res) = self.query_results.get(self.active_result_idx) {
                         if !res.columns.is_empty() {
                             let num_columns = res.columns.len();
                             let num_rows = res.rows.len();
 
-                            let mut table = TableBuilder::new(ui)
-                                .striped(true)
-                                .resizable(true)
-                                .cell_layout(Layout::left_to_right(Align::Center))
-                                .min_scrolled_height(0.0);
+                            ScrollArea::horizontal()
+                                .id_salt("results_table_horizontal_scroll")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    let mut table = TableBuilder::new(ui)
+                                        .striped(true)
+                                        .resizable(true)
+                                        .cell_layout(Layout::left_to_right(Align::Center))
+                                        .min_scrolled_height(0.0);
 
-                            for _ in 0..num_columns {
-                                table = table.column(Column::initial(120.0).at_least(60.0));
-                            }
-
-                            table
-                                .header(24.0, |mut header| {
-                                    for col_name in &res.columns {
-                                        header.col(|ui| {
-                                            ui.label(RichText::new(col_name).strong().color(theme.c_fg()));
-                                        });
+                                    for _ in 0..num_columns {
+                                        table = table.column(Column::initial(130.0).at_least(70.0));
                                     }
-                                })
-                                .body(|body| {
-                                    body.rows(22.0, num_rows, |mut row| {
-                                        let row_idx = row.index();
-                                        if let Some(record) = res.rows.get(row_idx) {
-                                            for col_idx in 0..num_columns {
-                                                row.col(|ui| {
-                                                    let val_opt = record.get(col_idx).and_then(|v| v.as_deref());
-                                                    let (display_text, is_null) = match val_opt {
-                                                        Some(s) => (s, false),
-                                                        None => ("NULL", true),
-                                                    };
 
-                                                    let text_widget = if is_null {
-                                                        RichText::new(display_text)
-                                                            .italics()
-                                                            .color(Color32::from_rgb(180, 140, 140))
-                                                    } else {
-                                                        RichText::new(display_text).color(theme.c_fg())
-                                                    };
-
-                                                    let cell_resp = ui.selectable_label(
-                                                        self.selected_table_cell == Some((row_idx, col_idx)),
-                                                        text_widget,
-                                                    );
-
-                                                    if cell_resp.clicked() {
-                                                        self.selected_table_cell = Some((row_idx, col_idx));
-                                                    }
-
-                                                    // Double click: copy cell value
-                                                    if cell_resp.double_clicked() {
-                                                        ctx.copy_text(display_text.to_string());
-                                                        self.status_text = tr("status_copied_cell");
-                                                    }
-
-                                                    // Context menu on table cell
-                                                    cell_resp.context_menu(|ui| {
-                                                        if ui.button(tr("ctx_copy_cell")).clicked() {
-                                                            ctx.copy_text(display_text.to_string());
-                                                            self.status_text = tr("status_copied_cell");
-                                                            ui.close_menu();
-                                                        }
-                                                        if ui.button(tr("ctx_copy_row_tsv")).clicked() {
-                                                            let tsv = record
-                                                                .iter()
-                                                                .map(|c| c.as_deref().unwrap_or("NULL"))
-                                                                .collect::<Vec<_>>()
-                                                                .join("\t");
-                                                            ctx.copy_text(tsv);
-                                                            self.status_text = tr("status_copied_cell");
-                                                            ui.close_menu();
-                                                        }
-                                                        if ui.button(tr("ctx_copy_row_csv")).clicked() {
-                                                            let csv = record
-                                                                .iter()
-                                                                .map(|c| format!("\"{}\"", c.as_deref().unwrap_or("NULL").replace('\"', "\"\"")))
-                                                                .collect::<Vec<_>>()
-                                                                .join(",");
-                                                            ctx.copy_text(csv);
-                                                            self.status_text = tr("status_copied_cell");
-                                                            ui.close_menu();
-                                                        }
-                                                        if ui.button(tr("ctx_copy_with_headers")).clicked() {
-                                                            let headers = res.columns.join("\t");
-                                                            let tsv = record
-                                                                .iter()
-                                                                .map(|c| c.as_deref().unwrap_or("NULL"))
-                                                                .collect::<Vec<_>>()
-                                                                .join("\t");
-                                                            ctx.copy_text(format!("{}\n{}", headers, tsv));
-                                                            self.status_text = tr("status_copied_cell");
-                                                            ui.close_menu();
-                                                        }
-                                                    });
+                                    table
+                                        .header(24.0, |mut header| {
+                                            for col_name in &res.columns {
+                                                header.col(|ui| {
+                                                    ui.label(RichText::new(col_name).strong().color(theme.c_fg()));
                                                 });
                                             }
-                                        }
-                                    });
+                                        })
+                                        .body(|body| {
+                                            body.rows(22.0, num_rows, |mut row| {
+                                                let row_idx = row.index();
+                                                if let Some(record) = res.rows.get(row_idx) {
+                                                    for col_idx in 0..num_columns {
+                                                        row.col(|ui| {
+                                                            let val_opt = record.get(col_idx).and_then(|v| v.as_deref());
+                                                            let (display_text, is_null) = match val_opt {
+                                                                Some(s) => (s, false),
+                                                                None => ("NULL", true),
+                                                            };
+
+                                                            let text_widget = if is_null {
+                                                                RichText::new(display_text)
+                                                                    .italics()
+                                                                    .color(Color32::from_rgb(180, 140, 140))
+                                                            } else {
+                                                                RichText::new(display_text).color(theme.c_fg())
+                                                            };
+
+                                                            let cell_resp = ui.selectable_label(
+                                                                self.selected_table_cell == Some((row_idx, col_idx)),
+                                                                text_widget,
+                                                            );
+
+                                                            if cell_resp.clicked() {
+                                                                self.selected_table_cell = Some((row_idx, col_idx));
+                                                            }
+
+                                                            // Double click: copy cell value
+                                                            if cell_resp.double_clicked() {
+                                                                ctx.copy_text(display_text.to_string());
+                                                                self.status_text = tr("status_copied_cell");
+                                                            }
+
+                                                            // Context menu on table cell
+                                                            cell_resp.context_menu(|ui| {
+                                                                if ui.button(tr("ctx_copy_cell")).clicked() {
+                                                                    ctx.copy_text(display_text.to_string());
+                                                                    self.status_text = tr("status_copied_cell");
+                                                                    ui.close_menu();
+                                                                }
+                                                                if ui.button(tr("ctx_copy_row_tsv")).clicked() {
+                                                                    let tsv = record
+                                                                        .iter()
+                                                                        .map(|c| c.as_deref().unwrap_or("NULL"))
+                                                                        .collect::<Vec<_>>()
+                                                                        .join("\t");
+                                                                    ctx.copy_text(tsv);
+                                                                    self.status_text = tr("status_copied_cell");
+                                                                    ui.close_menu();
+                                                                }
+                                                                if ui.button(tr("ctx_copy_row_csv")).clicked() {
+                                                                    let csv = record
+                                                                        .iter()
+                                                                        .map(|c| format!("\"{}\"", c.as_deref().unwrap_or("NULL").replace('\"', "\"\"")))
+                                                                        .collect::<Vec<_>>()
+                                                                        .join(",");
+                                                                    ctx.copy_text(csv);
+                                                                    self.status_text = tr("status_copied_cell");
+                                                                    ui.close_menu();
+                                                                }
+                                                                if ui.button(tr("ctx_copy_with_headers")).clicked() {
+                                                                    let headers = res.columns.join("\t");
+                                                                    let tsv = record
+                                                                        .iter()
+                                                                        .map(|c| c.as_deref().unwrap_or("NULL"))
+                                                                        .collect::<Vec<_>>()
+                                                                        .join("\t");
+                                                                    ctx.copy_text(format!("{}\n{}", headers, tsv));
+                                                                    self.status_text = tr("status_copied_cell");
+                                                                    ui.close_menu();
+                                                                }
+                                                            });
+                                                        });
+                                                    }
+                                                }
+                                            });
+                                        });
                                 });
                         } else if let Some(ref err) = res.error {
                             ui.label(RichText::new(format!("Error: {}", err)).color(Color32::from_rgb(255, 100, 100)));

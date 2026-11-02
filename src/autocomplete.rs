@@ -69,50 +69,53 @@ pub fn is_in_comment_or_string(text_before: &str) -> bool {
 
 pub fn get_current_statement(text_before: &str) -> &str {
     let mut last_semi = None;
-    let bytes = text_before.as_bytes();
     let mut index = 0;
+    let len = text_before.len();
 
-    while index < bytes.len() {
-        if text_before[index..].starts_with("--") || bytes[index] == b'#' {
-            let newline = text_before[index..].find('\n');
-            index = match newline {
-                Some(nl) => index + nl + 1,
-                None => bytes.len(),
-            };
+    while index < len {
+        let remainder = &text_before[index..];
+        if remainder.starts_with("--") || remainder.starts_with('#') {
+            if let Some(nl) = remainder.find('\n') {
+                index += nl + 1;
+            } else {
+                break;
+            }
             continue;
         }
-        if text_before[index..].starts_with("/*") {
-            let end = text_before[index + 2..].find("*/");
-            index = match end {
-                Some(e) => index + 2 + e + 2,
-                None => bytes.len(),
-            };
+        if remainder.starts_with("/*") {
+            if let Some(e) = remainder[2..].find("*/") {
+                index += 2 + e + 2;
+            } else {
+                break;
+            }
             continue;
         }
-        let char = bytes[index] as char;
-        if char == '\'' || char == '"' || char == '`' {
-            let quote = char;
-            index += 1;
-            while index < bytes.len() {
-                if bytes[index] == b'\\' && quote == '\'' {
+
+        let ch = remainder.chars().next().unwrap();
+        if ch == '\'' || ch == '"' || ch == '`' {
+            let quote = ch;
+            index += quote.len_utf8();
+            while index < len {
+                let s = &text_before[index..];
+                if quote == '\'' && s.starts_with("\\'") {
                     index += 2;
-                } else if bytes[index] as char == quote {
-                    if index + 1 < bytes.len() && bytes[index + 1] as char == quote {
-                        index += 2;
-                    } else {
-                        index += 1;
-                        break;
-                    }
+                } else if quote == '\'' && s.starts_with("''") {
+                    index += 2;
+                } else if s.starts_with(quote) {
+                    index += quote.len_utf8();
+                    break;
                 } else {
-                    index += 1;
+                    let next_ch = s.chars().next().unwrap();
+                    index += next_ch.len_utf8();
                 }
             }
             continue;
         }
-        if char == ';' {
+
+        if ch == ';' {
             last_semi = Some(index);
         }
-        index += 1;
+        index += ch.len_utf8();
     }
 
     if let Some(semi) = last_semi {

@@ -7,7 +7,7 @@ pub const MAX_RENDER_ROWS: usize = 10_000;
 pub const STREAM_BATCH: usize = 2_000;
 pub const RENDER_CHUNK: usize = 200;
 pub const RENDER_BUDGET_MS: u64 = 25;
-pub const MAX_HIGHLIGHT_CHARS: usize = 200_000;
+pub const MAX_HIGHLIGHT_CHARS: usize = 60_000;
 
 pub const BG: &str = "#1e1e1e";
 pub const BG_PANEL: &str = "#252526";

@@ -18,6 +18,44 @@ fn test_split_sql_statements() {
     assert_eq!(stmts[2], "/* comment with ; */ SELECT 'hello;world'");
 }
 
+use egui_extras::{Column, TableBuilder};
+
+#[test]
+fn test_utf8_pasted_text() {
+    let text = "SELECT * FROM pracownicy WHERE imię = 'Michał';\nSELECT id, nazwisko, pensja FROM pracownicy WHERE miasto = 'Kraków'";
+    let stmt = sql_editor::autocomplete::get_current_statement(text);
+    assert!(!stmt.is_empty());
+    assert!(stmt.contains("Kraków"));
+}
+
+#[test]
+fn test_table_builder_horizontal_scroll() {
+    let ctx = egui::Context::default();
+    let _ = ctx.run(Default::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                let mut table = TableBuilder::new(ui)
+                    .striped(true)
+                    .resizable(true);
+                for _ in 0..30 {
+                    table = table.column(Column::initial(120.0).at_least(60.0));
+                }
+                table.header(20.0, |mut h| {
+                    for i in 0..30 {
+                        h.col(|ui| { ui.label(format!("Col {}", i)); });
+                    }
+                }).body(|mut b| {
+                    b.row(20.0, |mut r| {
+                        for i in 0..30 {
+                            r.col(|ui| { ui.label(format!("Val {}", i)); });
+                        }
+                    });
+                });
+            });
+        });
+    });
+}
+
 #[test]
 fn test_is_unbounded_select() {
     assert!(is_unbounded_select("SELECT * FROM users"));
