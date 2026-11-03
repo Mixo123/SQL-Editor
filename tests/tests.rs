@@ -209,6 +209,7 @@ fn test_sqlite_query_and_schema() {
         .unwrap();
         conn.execute("INSERT INTO employees VALUES (1, 'Alice', 5000.0)", []).unwrap();
         conn.execute("INSERT INTO employees VALUES (2, 'Bob', NULL)", []).unwrap();
+        conn.execute("INSERT INTO employees VALUES (3, 'Charlie', 85000.50)", []).unwrap();
     }
 
     // Schema introspection
@@ -230,9 +231,19 @@ fn test_sqlite_query_and_schema() {
     .unwrap();
 
     assert_eq!(received_cols.unwrap(), vec!["id", "name", "salary"]);
-    assert_eq!(received_rows.len(), 2);
+    assert_eq!(received_rows.len(), 3);
     assert_eq!(received_rows[0], vec![Some("1".to_string()), Some("Alice".to_string()), Some("5000".to_string())]);
     assert_eq!(received_rows[1], vec![Some("2".to_string()), Some("Bob".to_string()), None]);
+    assert_eq!(received_rows[2], vec![Some("3".to_string()), Some("Charlie".to_string()), Some("85000.5".to_string())]);
+
+    // Ensure no cell anywhere is `<value>`
+    for row in &received_rows {
+        for cell in row {
+            if let Some(val) = cell {
+                assert_ne!(val, "<value>");
+            }
+        }
+    }
 
     // Test Exports
     let cols = ["id".into(), "name".into(), "salary".into()];

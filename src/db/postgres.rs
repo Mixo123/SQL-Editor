@@ -1,7 +1,7 @@
 //! PostgreSQL database support using postgres crate.
 
 use postgres::types::Type;
-use postgres::{Client, NoTls};
+use postgres::{Client, NoTls, SimpleQueryMessage};
 use std::collections::HashMap;
 
 use super::types::SchemaMap;
@@ -74,38 +74,6 @@ pub fn get_postgres_schema(dsn: &str) -> Result<SchemaMap, String> {
     Ok(schema)
 }
 
-fn format_pg_cell(row: &postgres::Row, idx: usize, ty: &Type) -> Option<String> {
-    if ty == &Type::BOOL {
-        return row.get::<_, Option<bool>>(idx).map(|v| v.to_string());
-    }
-    if ty == &Type::INT2 {
-        return row.get::<_, Option<i16>>(idx).map(|v| v.to_string());
-    }
-    if ty == &Type::INT4 {
-        return row.get::<_, Option<i32>>(idx).map(|v| v.to_string());
-    }
-    if ty == &Type::INT8 {
-        return row.get::<_, Option<i64>>(idx).map(|v| v.to_string());
-    }
-    if ty == &Type::FLOAT4 {
-        return row.get::<_, Option<f32>>(idx).map(|v| v.to_string());
-    }
-    if ty == &Type::FLOAT8 {
-        return row.get::<_, Option<f64>>(idx).map(|v| v.to_string());
-    }
-    if ty == &Type::TEXT || ty == &Type::VARCHAR || ty == &Type::BPCHAR || ty == &Type::NAME {
-        return row.get::<_, Option<String>>(idx);
-    }
-    // General fallback
-    if let Ok(opt_str) = row.try_get::<_, Option<String>>(idx) {
-        return opt_str;
-    }
-    if let Ok(opt_bytes) = row.try_get::<_, Option<&[u8]>>(idx) {
-        return opt_bytes.map(|b| format!("<{} bytes>", b.len()));
-    }
-    Some("<value>".to_string())
-}
-
 pub fn execute_postgres_stream<F>(
     dsn: &str,
     sql: &str,
@@ -117,50 +85,124 @@ where
 {
     let mut client = Client::connect(dsn, NoTls).map_err(|e| format_pg_error(&e))?;
 
-    // Check if query produces rows
-    let statement = client.prepare(sql).map_err(|e| format_pg_error(&e))?;
-    let columns = statement.columns();
+    // First attempt to prepare statement to check for column metadata
+    match client.prepare(sql) {
+        Ok(statement) => {
+            let columns = statement.columns();
+            if !columns.is_empty() {
+                let col_names: Vec<String> = columns.iter().map(|c| c.name().to_string()).collect();
+                let col_types: Vec<Type> = columns.iter().map(|c| c.type_().clone()).collect();
+                let col_count = col_names.len();
 
-    if !columns.is_empty() {
-        let col_names: Vec<String> = columns.iter().map(|c| c.name().to_string()).collect();
-        let col_types: Vec<Type> = columns.iter().map(|c| c.type_().clone()).collect();
-        let col_count = col_names.len();
+                let messages = client.simple_query(sql).map_err(|e| format_pg_error(&e))?;
 
-        let rows = client.query(&statement, &[]).map_err(|e| format_pg_error(&e))?;
+                let mut first = true;
+                let mut total = 0;
+                let mut batch = Vec::new();
 
-        let mut first = true;
-        let mut total = 0;
-        let mut batch = Vec::new();
+                for msg in messages {
+                    if let SimpleQueryMessage::Row(row) = msg {
+                        let mut record = Vec::with_capacity(col_count);
+                        for i in 0..col_count {
+                            let cell = row.get(i).map(|s| {
+                                if col_types.get(i) == Some(&Type::BOOL) {
+                                    if s == "t" {
+                                        "true".to_string()
+                                    } else if s == "f" {
+                                        "false".to_string()
+                                    } else {
+                                        s.to_string()
+                                    }
+                                } else {
+                                    s.to_string()
+                                }
+                            });
+                            record.push(cell);
+                        }
+                        batch.push(record);
 
-        for row in rows {
-            let mut record = Vec::with_capacity(col_count);
-            for i in 0..col_count {
-                let cell = format_pg_cell(&row, i, &col_types[i]);
-                record.push(cell);
-            }
-            batch.push(record);
+                        if batch.len() >= 2000 {
+                            on_batch(if first { Some(col_names.clone()) } else { None }, batch);
+                            first = false;
+                            batch = Vec::new();
+                        }
 
-            if batch.len() >= 2000 {
-                on_batch(if first { Some(col_names.clone()) } else { None }, batch);
-                first = false;
-                batch = Vec::new();
-            }
+                        total += 1;
+                        if total >= limit {
+                            break;
+                        }
+                    }
+                }
 
-            total += 1;
-            if total >= limit {
-                break;
+                if !batch.is_empty() || first {
+                    on_batch(if first { Some(col_names) } else { None }, batch);
+                }
+            } else {
+                let affected = client.execute(&statement, &[]).map_err(|e| format_pg_error(&e))?;
+                on_batch(
+                    Some(vec!["status".to_string()]),
+                    vec![vec![Some(format!("Rows affected: {}", affected))]],
+                );
             }
         }
+        Err(_prep_err) => {
+            // Some statements cannot be prepared (e.g. multiple statements, or certain commands),
+            // fallback directly to simple_query
+            let messages = client.simple_query(sql).map_err(|e| format_pg_error(&e))?;
 
-        if !batch.is_empty() || first {
-            on_batch(if first { Some(col_names) } else { None }, batch);
+            let mut first = true;
+            let mut total = 0;
+            let mut batch = Vec::new();
+            let mut col_names: Vec<String> = Vec::new();
+            let mut affected_total: Option<u64> = None;
+
+            for msg in messages {
+                match msg {
+                    SimpleQueryMessage::Row(row) => {
+                        if col_names.is_empty() {
+                            col_names = row.columns().iter().map(|c| c.name().to_string()).collect();
+                        }
+                        let col_count = row.len();
+                        let mut record = Vec::with_capacity(col_count);
+                        for i in 0..col_count {
+                            record.push(row.get(i).map(|s| s.to_string()));
+                        }
+                        batch.push(record);
+
+                        if batch.len() >= 2000 {
+                            on_batch(if first { Some(col_names.clone()) } else { None }, batch);
+                            first = false;
+                            batch = Vec::new();
+                        }
+
+                        total += 1;
+                        if total >= limit {
+                            break;
+                        }
+                    }
+                    SimpleQueryMessage::CommandComplete(affected) => {
+                        affected_total = Some(affected);
+                    }
+                    _ => {}
+                }
+            }
+
+            if !col_names.is_empty() {
+                if !batch.is_empty() || first {
+                    on_batch(if first { Some(col_names) } else { None }, batch);
+                }
+            } else if let Some(affected) = affected_total {
+                on_batch(
+                    Some(vec!["status".to_string()]),
+                    vec![vec![Some(format!("Rows affected: {}", affected))]],
+                );
+            } else {
+                on_batch(
+                    Some(vec!["status".to_string()]),
+                    vec![vec![Some("Query executed successfully".to_string())]],
+                );
+            }
         }
-    } else {
-        let affected = client.execute(&statement, &[]).map_err(|e| format_pg_error(&e))?;
-        on_batch(
-            Some(vec!["status".to_string()]),
-            vec![vec![Some(format!("Rows affected: {}", affected))]],
-        );
     }
 
     Ok(())
