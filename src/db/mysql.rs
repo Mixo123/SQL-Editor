@@ -6,17 +6,26 @@ use std::collections::HashMap;
 
 use super::types::SchemaMap;
 
+pub fn format_mysql_error(e: &mysql::Error) -> String {
+    match e {
+        mysql::Error::MySqlError(err) => {
+            format!("MySQL Error {}: {} [SQLSTATE {}]", err.code, err.message, err.state)
+        }
+        _ => e.to_string(),
+    }
+}
+
 pub fn test_mysql(dsn: &str) -> Result<(), String> {
-    let opts = Opts::from_url(dsn).map_err(|e| e.to_string())?;
-    let mut conn = Conn::new(opts).map_err(|e| e.to_string())?;
-    conn.query_drop("SELECT 1").map_err(|e| e.to_string())?;
+    let opts = Opts::from_url(dsn).map_err(|e| format!("Błędny adres URL bazy danych MySQL: {}", e))?;
+    let mut conn = Conn::new(opts).map_err(|e| format_mysql_error(&e))?;
+    conn.query_drop("SELECT 1").map_err(|e| format_mysql_error(&e))?;
     Ok(())
 }
 
 pub fn get_mysql_schema(dsn: &str) -> Result<SchemaMap, String> {
-    let opts = Opts::from_url(dsn).map_err(|e| e.to_string())?;
+    let opts = Opts::from_url(dsn).map_err(|e| format!("Błędny adres URL bazy danych MySQL: {}", e))?;
     let db_name = opts.get_db_name().unwrap_or("").to_string();
-    let mut conn = Conn::new(opts).map_err(|e| e.to_string())?;
+    let mut conn = Conn::new(opts).map_err(|e| format_mysql_error(&e))?;
     let mut schema = HashMap::new();
 
     let sql = format!(
@@ -29,7 +38,7 @@ pub fn get_mysql_schema(dsn: &str) -> Result<SchemaMap, String> {
 
     let rows: Vec<(String, String)> = conn
         .query_map(&sql, |(tbl, col)| (tbl, col))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format_mysql_error(&e))?;
 
     for (tbl, col) in rows {
         schema.entry(tbl).or_insert_with(Vec::new).push(col);
@@ -47,10 +56,10 @@ pub fn execute_mysql_stream<F>(
 where
     F: FnMut(Option<Vec<String>>, Vec<Vec<Option<String>>>),
 {
-    let opts = Opts::from_url(dsn).map_err(|e| e.to_string())?;
-    let mut conn = Conn::new(opts).map_err(|e| e.to_string())?;
+    let opts = Opts::from_url(dsn).map_err(|e| format!("Błędny adres URL bazy danych MySQL: {}", e))?;
+    let mut conn = Conn::new(opts).map_err(|e| format_mysql_error(&e))?;
 
-    let mut query_result = conn.query_iter(sql).map_err(|e| e.to_string())?;
+    let mut query_result = conn.query_iter(sql).map_err(|e| format_mysql_error(&e))?;
 
     let cols: Vec<String> = query_result
         .columns()
@@ -65,7 +74,7 @@ where
         let mut batch = Vec::new();
 
         for row_res in query_result.by_ref() {
-            let row = row_res.map_err(|e| e.to_string())?;
+            let row = row_res.map_err(|e| format_mysql_error(&e))?;
             let mut record = Vec::with_capacity(cols.len());
 
             for (i, _) in cols.iter().enumerate() {

@@ -7,6 +7,20 @@ use std::path::PathBuf;
 
 use super::types::SchemaMap;
 
+pub fn format_sqlite_error(e: &rusqlite::Error) -> String {
+    match e {
+        rusqlite::Error::SqliteFailure(err, msg) => {
+            let detail = msg.as_deref().unwrap_or("");
+            if !detail.is_empty() {
+                format!("SQLite Error (kod {}): {}", err.extended_code, detail)
+            } else {
+                format!("SQLite Error (kod {}): {}", err.extended_code, err)
+            }
+        }
+        _ => e.to_string(),
+    }
+}
+
 pub fn resolve_db_path(p: &str) -> PathBuf {
     if p.starts_with("~/") || p == "~" {
         if let Some(ud) = directories::UserDirs::new() {
@@ -21,9 +35,9 @@ pub fn test_sqlite(path_str: &str) -> Result<(), String> {
     if !p.is_file() {
         return Err(format!("SQLite database file not found: {}", path_str));
     }
-    let conn = Connection::open(&p).map_err(|e| e.to_string())?;
+    let conn = Connection::open(&p).map_err(|e| format_sqlite_error(&e))?;
     conn.query_row("SELECT name FROM sqlite_master LIMIT 1", [], |_| Ok(()))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format_sqlite_error(&e))?;
     Ok(())
 }
 
@@ -32,15 +46,15 @@ pub fn get_sqlite_schema(path_str: &str) -> Result<SchemaMap, String> {
     if !p.is_file() {
         return Ok(HashMap::new());
     }
-    let conn = Connection::open(&p).map_err(|e| e.to_string())?;
+    let conn = Connection::open(&p).map_err(|e| format_sqlite_error(&e))?;
 
     let mut stmt = conn
         .prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name")
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format_sqlite_error(&e))?;
 
     let tables: Vec<String> = stmt
         .query_map([], |row| row.get(0))
-        .map_err(|e| e.to_string())?
+        .map_err(|e| format_sqlite_error(&e))?
         .filter_map(|r| r.ok())
         .collect();
 
@@ -73,9 +87,9 @@ where
     if !p.is_file() {
         return Err(format!("SQLite database file not found: {}", path_str));
     }
-    let conn = Connection::open(&p).map_err(|e| e.to_string())?;
+    let conn = Connection::open(&p).map_err(|e| format_sqlite_error(&e))?;
 
-    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(sql).map_err(|e| format_sqlite_error(&e))?;
 
     let col_count = stmt.column_count();
     if col_count > 0 {
@@ -84,12 +98,12 @@ where
         let mut total = 0;
         let mut batch = Vec::new();
 
-        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| format_sqlite_error(&e))?;
 
-        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        while let Some(row) = rows.next().map_err(|e| format_sqlite_error(&e))? {
             let mut record = Vec::with_capacity(col_count);
             for i in 0..col_count {
-                let val_ref = row.get_ref(i).map_err(|e| e.to_string())?;
+                let val_ref = row.get_ref(i).map_err(|e| format_sqlite_error(&e))?;
                 let str_val = match val_ref {
                     ValueRef::Null => None,
                     ValueRef::Integer(v) => Some(v.to_string()),
@@ -117,7 +131,7 @@ where
             on_batch(if first { Some(cols) } else { None }, batch);
         }
     } else {
-        let affected = stmt.execute([]).map_err(|e| e.to_string())?;
+        let affected = stmt.execute([]).map_err(|e| format_sqlite_error(&e))?;
         on_batch(
             Some(vec!["status".to_string()]),
             vec![vec![Some(format!("Rows affected: {}", affected))]],

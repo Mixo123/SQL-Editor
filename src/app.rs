@@ -475,11 +475,12 @@ impl SqlEditorApp {
                     QueryMsg::Error(idx, err) => {
                         if let Some(res) = self.query_results.get_mut(idx) {
                             res.error = Some(err.clone());
-                            res.columns = vec!["Error".to_string()];
-                            res.rows = vec![vec![Some(err)]];
+                            res.columns.clear();
+                            res.rows.clear();
                             res.finished = true;
                         }
-                        self.status_text = "Błąd wykonania zapytania".to_string();
+                        let first_line = err.lines().next().unwrap_or("Błąd wykonania zapytania");
+                        self.status_text = format!("Błąd: {}", first_line);
                     }
                     QueryMsg::AllFinished(elapsed) => {
                         finished = true;
@@ -1306,9 +1307,55 @@ impl eframe::App for SqlEditorApp {
                         ui.separator();
                     }
 
-                    // Results Table with Virtual Scrolling and Horizontal Scrollbar
+                    // Results Table with Virtual Scrolling and Horizontal Scrollbar, or Detailed Error View
                     if let Some(res) = self.query_results.get(self.active_result_idx) {
-                        if !res.columns.is_empty() {
+                        if let Some(ref err) = res.error {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("❌ Błąd wykonania zapytania:")
+                                        .color(Color32::from_rgb(255, 100, 100))
+                                        .strong()
+                                        .size(13.0),
+                                );
+                                if res.elapsed_secs > 0.0 {
+                                    ui.label(
+                                        RichText::new(format!("({:.2}s)", res.elapsed_secs))
+                                            .color(Color32::GRAY)
+                                            .size(11.0),
+                                    );
+                                }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.button("📋 Kopiuj pełny błąd").clicked() {
+                                        ctx.copy_text(err.clone());
+                                        self.status_text = "Skopiowano treść błędu do schowka".to_string();
+                                    }
+                                });
+                            });
+
+                            ui.add_space(4.0);
+                            ScrollArea::both()
+                                .id_salt("query_error_scroll_area")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    egui::Frame::none()
+                                        .fill(theme.c_bg_panel())
+                                        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(180, 50, 50)))
+                                        .inner_margin(12.0)
+                                        .rounding(4.0)
+                                        .show(ui, |ui| {
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(err)
+                                                        .monospace()
+                                                        .size(12.5)
+                                                        .color(Color32::from_rgb(255, 130, 130)),
+                                                )
+                                                .wrap(),
+                                            );
+                                        });
+                                });
+                        } else if !res.columns.is_empty() {
                             let num_columns = res.columns.len();
                             let num_rows = res.rows.len();
 
@@ -1414,8 +1461,6 @@ impl eframe::App for SqlEditorApp {
                                             });
                                         });
                                 });
-                        } else if let Some(ref err) = res.error {
-                            ui.label(RichText::new(format!("Error: {}", err)).color(Color32::from_rgb(255, 100, 100)));
                         }
                     } else {
                         ui.vertical_centered(|ui| {

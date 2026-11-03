@@ -6,14 +6,42 @@ use std::collections::HashMap;
 
 use super::types::SchemaMap;
 
+pub fn format_pg_error(e: &postgres::Error) -> String {
+    if let Some(db_err) = e.as_db_error() {
+        let mut msg = format!("{}: {}", db_err.severity(), db_err.message());
+        msg.push_str(&format!(" [SQLSTATE {}]", db_err.code().code()));
+        if let Some(detail) = db_err.detail() {
+            msg.push_str(&format!("\nSzczegóły: {}", detail));
+        }
+        if let Some(hint) = db_err.hint() {
+            msg.push_str(&format!("\nWskazówka: {}", hint));
+        }
+        if let Some(pos) = db_err.position() {
+            msg.push_str(&format!("\nPozycja w zapytaniu: {:?}", pos));
+        }
+        if let Some(w) = db_err.where_() {
+            msg.push_str(&format!("\nKontekst: {}", w));
+        }
+        if let Some(table) = db_err.table() {
+            msg.push_str(&format!("\nTabela: {}", table));
+        }
+        if let Some(column) = db_err.column() {
+            msg.push_str(&format!("\nKolumna: {}", column));
+        }
+        msg
+    } else {
+        e.to_string()
+    }
+}
+
 pub fn test_postgres(dsn: &str) -> Result<(), String> {
-    let mut client = Client::connect(dsn, NoTls).map_err(|e| e.to_string())?;
-    client.simple_query("SELECT 1;").map_err(|e| e.to_string())?;
+    let mut client = Client::connect(dsn, NoTls).map_err(|e| format_pg_error(&e))?;
+    client.simple_query("SELECT 1;").map_err(|e| format_pg_error(&e))?;
     Ok(())
 }
 
 pub fn get_postgres_schema(dsn: &str) -> Result<SchemaMap, String> {
-    let mut client = Client::connect(dsn, NoTls).map_err(|e| e.to_string())?;
+    let mut client = Client::connect(dsn, NoTls).map_err(|e| format_pg_error(&e))?;
     let mut schema = HashMap::new();
 
     let tables_sql = "
@@ -22,7 +50,7 @@ pub fn get_postgres_schema(dsn: &str) -> Result<SchemaMap, String> {
         WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
         ORDER BY table_name;
     ";
-    let rows = client.query(tables_sql, &[]).map_err(|e| e.to_string())?;
+    let rows = client.query(tables_sql, &[]).map_err(|e| format_pg_error(&e))?;
     for row in rows {
         let tbl: String = row.get(0);
         schema.insert(tbl, Vec::new());
@@ -34,7 +62,7 @@ pub fn get_postgres_schema(dsn: &str) -> Result<SchemaMap, String> {
         WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
         ORDER BY table_name, ordinal_position;
     ";
-    let col_rows = client.query(cols_sql, &[]).map_err(|e| e.to_string())?;
+    let col_rows = client.query(cols_sql, &[]).map_err(|e| format_pg_error(&e))?;
     for row in col_rows {
         let tbl: String = row.get(0);
         let col: String = row.get(1);
@@ -87,10 +115,10 @@ pub fn execute_postgres_stream<F>(
 where
     F: FnMut(Option<Vec<String>>, Vec<Vec<Option<String>>>),
 {
-    let mut client = Client::connect(dsn, NoTls).map_err(|e| e.to_string())?;
+    let mut client = Client::connect(dsn, NoTls).map_err(|e| format_pg_error(&e))?;
 
     // Check if query produces rows
-    let statement = client.prepare(sql).map_err(|e| e.to_string())?;
+    let statement = client.prepare(sql).map_err(|e| format_pg_error(&e))?;
     let columns = statement.columns();
 
     if !columns.is_empty() {
@@ -98,7 +126,7 @@ where
         let col_types: Vec<Type> = columns.iter().map(|c| c.type_().clone()).collect();
         let col_count = col_names.len();
 
-        let rows = client.query(&statement, &[]).map_err(|e| e.to_string())?;
+        let rows = client.query(&statement, &[]).map_err(|e| format_pg_error(&e))?;
 
         let mut first = true;
         let mut total = 0;
@@ -128,7 +156,7 @@ where
             on_batch(if first { Some(col_names) } else { None }, batch);
         }
     } else {
-        let affected = client.execute(&statement, &[]).map_err(|e| e.to_string())?;
+        let affected = client.execute(&statement, &[]).map_err(|e| format_pg_error(&e))?;
         on_batch(
             Some(vec!["status".to_string()]),
             vec![vec![Some(format!("Rows affected: {}", affected))]],

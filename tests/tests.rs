@@ -280,6 +280,13 @@ fn test_sqlite_query_and_schema() {
     assert_eq!(q2_cols.unwrap(), vec!["salary"]);
     assert_eq!(q2_rows.len(), 1);
     assert_eq!(q2_rows[0], vec![None]);
+
+    // Test detailed database error formatting
+    let err = execute_sqlite_stream(db_str, "SELECT * FROM non_existing_table_xyz", 100, |_, _| {})
+        .unwrap_err();
+    assert!(err.contains("SQLite Error"));
+    assert!(err.contains("no such table: non_existing_table_xyz"));
+    assert!(err.contains("kod 1"));
 }
 
 #[test]
