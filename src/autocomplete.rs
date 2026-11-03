@@ -218,6 +218,10 @@ pub fn get_autocomplete_suggestions(
         ("", cleaned.as_ref())
     };
 
+    if prefix.is_empty() || prefix.chars().all(|c| c.is_ascii_digit()) {
+        return (Vec::new(), 0);
+    }
+
     let pref_low = prefix.to_lowercase();
 
     // Find the last significant SQL keyword before the current word / whitespace
@@ -417,5 +421,75 @@ pub fn get_autocomplete_suggestions(
     }
 
     (results, prefix.len())
+}
+
+/// Finds the start and end character indices of the word at `cursor_idx` in `chars`.
+/// Expands across alphanumeric characters and underscores (`_`).
+pub fn find_word_range_at(chars: &[char], cursor_idx: usize) -> (usize, usize) {
+    if chars.is_empty() {
+        return (0, 0);
+    }
+    let len = chars.len();
+    let idx = cursor_idx.min(len);
+
+    let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
+
+    let target_idx = if idx < len && is_word_char(chars[idx]) {
+        idx
+    } else if idx > 0 && is_word_char(chars[idx - 1]) {
+        idx - 1
+    } else if idx < len {
+        idx
+    } else {
+        len.saturating_sub(1)
+    };
+
+    if is_word_char(chars[target_idx]) {
+        let mut start = target_idx;
+        while start > 0 && is_word_char(chars[start - 1]) {
+            start -= 1;
+        }
+        let mut end = target_idx;
+        while end < len && is_word_char(chars[end]) {
+            end += 1;
+        }
+        (start, end)
+    } else {
+        let ch = chars[target_idx];
+        let mut start = target_idx;
+        while start > 0 && chars[start - 1] == ch {
+            start -= 1;
+        }
+        let mut end = target_idx;
+        while end < len && chars[end] == ch {
+            end += 1;
+        }
+        (start, end)
+    }
+}
+
+/// Finds the start and end character indices of the line at `cursor_idx` in `chars`.
+/// Selects from the start of the line up to and including the trailing newline character (if present).
+pub fn find_line_range_at(chars: &[char], cursor_idx: usize) -> (usize, usize) {
+    if chars.is_empty() {
+        return (0, 0);
+    }
+    let len = chars.len();
+    let idx = cursor_idx.min(len);
+
+    let mut start = idx;
+    while start > 0 && chars[start - 1] != '\n' {
+        start -= 1;
+    }
+
+    let mut end = idx;
+    while end < len && chars[end] != '\n' {
+        end += 1;
+    }
+    if end < len && chars[end] == '\n' {
+        end += 1;
+    }
+
+    (start, end)
 }
 

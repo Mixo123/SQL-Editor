@@ -92,6 +92,49 @@ fn test_autocomplete() {
     // Test dot notation users.e
     let (suggs, _) = get_autocomplete_suggestions("SELECT users.e", &schema, None);
     assert!(suggs.iter().any(|s| s.text == "email"));
+
+    // Autocomplete should NOT trigger when typing spaces, newlines, or numbers
+    assert!(get_autocomplete_suggestions("SELECT * FROM ", &schema, None).0.is_empty());
+    assert!(get_autocomplete_suggestions("SELECT 1;\n", &schema, None).0.is_empty());
+    assert!(get_autocomplete_suggestions("", &schema, None).0.is_empty());
+    assert!(get_autocomplete_suggestions("WHERE id = 123", &schema, None).0.is_empty());
+}
+
+#[test]
+fn test_word_and_line_selection() {
+    use sql_editor::autocomplete::{find_line_range_at, find_word_range_at};
+
+    let sql = "SELECT user_id, imię FROM pracownicy_kraków;\nWHERE pensja > 5000;\nORDER BY id;";
+    let chars: Vec<char> = sql.chars().collect();
+
+    // Double-click on 'user_id'
+    let idx_user_id = sql.find("user_id").unwrap() + 3;
+    let (w_start, w_end) = find_word_range_at(&chars, idx_user_id);
+    let selected_word: String = chars[w_start..w_end].iter().collect();
+    assert_eq!(selected_word, "user_id");
+
+    // Double-click on Unicode Polish word 'pracownicy_kraków'
+    let idx_pl = sql.find("pracownicy_kraków").unwrap() + 5;
+    let (pl_start, pl_end) = find_word_range_at(&chars, idx_pl);
+    let selected_pl: String = chars[pl_start..pl_end].iter().collect();
+    assert_eq!(selected_pl, "pracownicy_kraków");
+
+    // Triple-click on line 1
+    let (l1_start, l1_end) = find_line_range_at(&chars, idx_user_id);
+    let line1: String = chars[l1_start..l1_end].iter().collect();
+    assert_eq!(line1, "SELECT user_id, imię FROM pracownicy_kraków;\n");
+
+    // Triple-click on line 2
+    let idx_line2 = sql.find("pensja").unwrap();
+    let (l2_start, l2_end) = find_line_range_at(&chars, idx_line2);
+    let line2: String = chars[l2_start..l2_end].iter().collect();
+    assert_eq!(line2, "WHERE pensja > 5000;\n");
+
+    // Triple-click on last line (line 3, no trailing newline)
+    let idx_line3 = sql.find("ORDER").unwrap();
+    let (l3_start, l3_end) = find_line_range_at(&chars, idx_line3);
+    let line3: String = chars[l3_start..l3_end].iter().collect();
+    assert_eq!(line3, "ORDER BY id;");
 }
 
 #[test]
@@ -140,6 +183,14 @@ fn test_egui_text_edit_state() {
     if let Some(state) = egui::text_edit::TextEditState::load(&ctx, id) {
         let _ = state.cursor.char_range().map(|r| r.primary.index);
     }
+    let _ = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(5));
+    let _ = ctx.run(Default::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let r = ui.label("hello");
+            let _ = r.double_clicked();
+            let _ = r.triple_clicked();
+        });
+    });
 }
 
 #[test]
@@ -273,4 +324,83 @@ fn test_session_save_and_load() {
     assert_eq!(loaded.tabs[1].name, "Bez tytułu 2");
     assert_eq!(loaded.tabs[1].content, "SELECT COUNT(*) FROM orders;");
     assert!(loaded.tabs[1].modified);
+}
+
+#[test]
+fn test_updater_formatters() {
+    use sql_editor::updater::{format_size, format_speed};
+
+    assert_eq!(format_size(0), "0 B");
+    assert_eq!(format_size(500 * 1024), "500.0 KB");
+    assert_eq!(format_size(15 * 1024 * 1024), "15.0 MB");
+
+    assert_eq!(format_speed(250.0), "250 B/s");
+    assert_eq!(format_speed(1500.0), "1.5 KB/s");
+    assert_eq!(format_speed(2.5 * 1024.0 * 1024.0), "2.5 MB/s");
+}
+
+#[test]
+fn test_in_app_download() {
+    use std::io::Cursor;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
+    use tempfile::tempdir;
+
+    let payload = b"test payload for update download in sql editor rust";
+    let reader = Cursor::new(payload);
+    let tmp = tempdir().unwrap();
+    let target_file = tmp.path().join("sql-editor-macos.dmg");
+
+    let progress = Arc::new(Mutex::new(sql_editor::updater::DownloadProgress {
+        asset_name: "sql-editor-macos.dmg".to_string(),
+        target_path: target_file.clone(),
+        downloaded_bytes: 0,
+        total_bytes: Some(payload.len() as u64),
+        speed_bytes_per_sec: 0.0,
+        finished: false,
+        error: None,
+    }));
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    sql_editor::updater::download_from_reader(
+        reader,
+        &target_file,
+        Some(payload.len() as u64),
+        Arc::clone(&progress),
+        Arc::clone(&cancel),
+    );
+
+    let p = progress.lock().unwrap().clone();
+    assert!(p.finished);
+    assert!(p.error.is_none());
+    assert_eq!(p.downloaded_bytes, payload.len() as u64);
+    assert_eq!(p.total_bytes, Some(payload.len() as u64));
+    assert!(target_file.exists());
+    let content = std::fs::read(&target_file).unwrap();
+    assert_eq!(content, payload);
+
+    // Test cancellation
+    let target_file2 = tmp.path().join("sql-editor-cancelled.dmg");
+    let progress2 = Arc::new(Mutex::new(sql_editor::updater::DownloadProgress {
+        asset_name: "sql-editor-cancelled.dmg".to_string(),
+        target_path: target_file2.clone(),
+        downloaded_bytes: 0,
+        total_bytes: Some(payload.len() as u64),
+        speed_bytes_per_sec: 0.0,
+        finished: false,
+        error: None,
+    }));
+    let cancel2 = Arc::new(AtomicBool::new(true)); // cancel immediately
+
+    sql_editor::updater::download_from_reader(
+        Cursor::new(payload),
+        &target_file2,
+        Some(payload.len() as u64),
+        Arc::clone(&progress2),
+        Arc::clone(&cancel2),
+    );
+
+    let p2 = progress2.lock().unwrap().clone();
+    assert!(!p2.finished);
+    assert!(!target_file2.exists());
 }

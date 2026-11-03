@@ -561,6 +561,36 @@ impl SqlEditorApp {
         ctx.memory_mut(|m| m.request_focus(text_edit_id));
     }
 
+    pub fn insert_tab_spaces(&mut self, text_edit_id: egui::Id, ctx: &Context, num_spaces: usize) {
+        let Some(tab) = self.active_tab_mut() else { return };
+        let spaces = " ".repeat(num_spaces);
+
+        let state_opt = egui::text_edit::TextEditState::load(ctx, text_edit_id);
+        let char_range = state_opt.as_ref().and_then(|s| s.cursor.char_range());
+
+        let (start_idx, end_idx) = if let Some(r) = char_range {
+            let p = r.primary.index;
+            let s = r.secondary.index;
+            (p.min(s), p.max(s))
+        } else {
+            let len = tab.content.chars().count();
+            (len, len)
+        };
+
+        let text_before: String = tab.content.chars().take(start_idx).collect();
+        let text_after: String = tab.content.chars().skip(end_idx).collect();
+
+        tab.content = format!("{}{}{}", text_before, spaces, text_after);
+        tab.modified = true;
+
+        let new_cursor = text_before.chars().count() + spaces.chars().count();
+        let mut state = state_opt.unwrap_or_default();
+        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(new_cursor))));
+        state.store(ctx, text_edit_id);
+        ctx.memory_mut(|m| m.request_focus(text_edit_id));
+        self.save_session();
+    }
+
     pub fn export_active_result(&mut self, format_type: &str) {
         let Some(res) = self.query_results.get(self.active_result_idx) else {
             self.status_text = tr("msg_export_no_results");
@@ -617,8 +647,12 @@ impl eframe::App for SqlEditorApp {
 
         let text_edit_id = egui::Id::new("sql_main_editor");
 
-        // Autocomplete keyboard handling
+        // Editor & Autocomplete keyboard handling
         let mut do_insert_autocomplete = false;
+        let mut do_insert_tab = false;
+
+        let editor_has_focus = ctx.memory(|m| m.has_focus(text_edit_id));
+
         if self.show_autocomplete && !self.suggestions.is_empty() {
             ctx.input_mut(|i| {
                 if i.key_pressed(Key::ArrowDown) {
@@ -627,20 +661,32 @@ impl eframe::App for SqlEditorApp {
                 } else if i.key_pressed(Key::ArrowUp) {
                     i.consume_key(Modifiers::NONE, Key::ArrowUp);
                     self.selected_suggestion = (self.selected_suggestion + self.suggestions.len() - 1) % self.suggestions.len();
-                } else if i.key_pressed(Key::Tab) || (i.key_pressed(Key::Enter) && !i.modifiers.ctrl && !i.modifiers.command) {
+                } else if i.key_pressed(Key::Tab) {
                     i.consume_key(Modifiers::NONE, Key::Tab);
                     i.consume_key(Modifiers::SHIFT, Key::Tab);
-                    i.consume_key(Modifiers::NONE, Key::Enter);
                     do_insert_autocomplete = true;
                 } else if i.key_pressed(Key::Escape) {
                     i.consume_key(Modifiers::NONE, Key::Escape);
                     self.show_autocomplete = false;
+                } else if i.key_pressed(Key::Enter) && !i.modifiers.ctrl && !i.modifiers.command {
+                    // Do NOT intercept Enter: close autocomplete popup so Enter inserts a newline in TextEdit
+                    self.show_autocomplete = false;
+                }
+            });
+        } else if editor_has_focus {
+            ctx.input_mut(|i| {
+                if i.key_pressed(Key::Tab) && !i.modifiers.ctrl && !i.modifiers.command && !i.modifiers.alt {
+                    i.consume_key(Modifiers::NONE, Key::Tab);
+                    i.consume_key(Modifiers::SHIFT, Key::Tab);
+                    do_insert_tab = true;
                 }
             });
         }
 
         if do_insert_autocomplete {
             self.insert_autocomplete_suggestion(text_edit_id, ctx);
+        } else if do_insert_tab {
+            self.insert_tab_spaces(text_edit_id, ctx, 4);
         }
 
         // Keyboard shortcuts
@@ -1001,9 +1047,56 @@ impl eframe::App for SqlEditorApp {
                     });
 
                     let response = frame_res.inner.inner;
-                    if frame_res.response.interact(Sense::click()).clicked() && !response.has_focus() {
-                        ctx.memory_mut(|m| m.request_focus(text_edit_id));
+
+                    // 1. Triple-click: Select entire line
+                    if response.triple_clicked() {
+                        self.show_autocomplete = false;
+                        let chars: Vec<char> = content_to_edit.chars().collect();
+                        if let Some(cursor_idx) = egui::text_edit::TextEditState::load(ctx, text_edit_id)
+                            .and_then(|s| s.cursor.char_range())
+                            .map(|r| r.primary.index)
+                        {
+                            let (start, end) = crate::autocomplete::find_line_range_at(&chars, cursor_idx);
+                            if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, text_edit_id) {
+                                state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                                    egui::text::CCursor::new(start),
+                                    egui::text::CCursor::new(end),
+                                )));
+                                state.store(ctx, text_edit_id);
+                            }
+                        }
+                    // 2. Double-click: Select word
+                    } else if response.double_clicked() {
+                        self.show_autocomplete = false;
+                        let chars: Vec<char> = content_to_edit.chars().collect();
+                        if let Some(cursor_idx) = egui::text_edit::TextEditState::load(ctx, text_edit_id)
+                            .and_then(|s| s.cursor.char_range())
+                            .map(|r| r.primary.index)
+                        {
+                            let (start, end) = crate::autocomplete::find_word_range_at(&chars, cursor_idx);
+                            if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, text_edit_id) {
+                                state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                                    egui::text::CCursor::new(start),
+                                    egui::text::CCursor::new(end),
+                                )));
+                                state.store(ctx, text_edit_id);
+                            }
+                        }
+                    // 3. Single click: Dismiss autocomplete popup
+                    } else if response.clicked() {
+                        self.show_autocomplete = false;
                     }
+
+                    // Focus editor if clicked on empty frame padding around text edit
+                    if !response.has_focus() {
+                        if let Some(pos) = ctx.input(|i| i.pointer.press_origin()) {
+                            if frame_res.response.rect.contains(pos) && !response.rect.contains(pos) {
+                                ctx.memory_mut(|m| m.request_focus(text_edit_id));
+                                self.show_autocomplete = false;
+                            }
+                        }
+                    }
+
                     if response.lost_focus() {
                         self.save_session();
                     }
