@@ -214,6 +214,59 @@ impl SqlEditorApp {
 
         app
     }
+}
+
+impl Default for SqlEditorApp {
+    fn default() -> Self {
+        let settings = load_settings();
+        let theme = get_theme(&settings.theme_name, &settings.custom_theme_colors);
+        let connections = load_connections();
+
+        let initial_tab = EditorTab {
+            id: 1,
+            name: format!("{} 1", tr("tab_untitled")),
+            path: None,
+            content: "-- Write your SQL query here\nSELECT 1;\n".to_string(),
+            modified: false,
+        };
+
+        Self {
+            tabs: vec![initial_tab],
+            active_tab_id: 1,
+            next_tab_id: 2,
+            editor_height: 380.0,
+            connections,
+            active_conn_name: None,
+            schema_cache: HashMap::new(),
+            schema_rx: None,
+            query_results: Vec::new(),
+            active_result_idx: 0,
+            busy: false,
+            status_text: tr("status_ready"),
+            query_rx: None,
+            cancel_sender: None,
+            query_start_time: None,
+            show_autocomplete: false,
+            suggestions: Vec::new(),
+            selected_suggestion: 0,
+            autocomplete_prefix_len: 0,
+            confirm_close_dirty: None,
+            confirm_quit: false,
+            confirm_unbounded: None,
+            conn_context_menu: None,
+            selected_table_cell: None,
+            settings: settings.clone(),
+            theme,
+            conn_dialog: ConnectionDialog::new(),
+            settings_dialog: SettingsDialog::new(),
+            about_dialog: AboutDialog::new(),
+            update_dialog: UpdateDialog::new(),
+            update_rx: None,
+        }
+    }
+}
+
+impl SqlEditorApp {
 
     pub fn fetch_schema(&mut self, name: &str) {
         if let Some(conn) = self.connections.iter().find(|c| c.name == name).cloned() {
@@ -362,7 +415,36 @@ impl SqlEditorApp {
         }
     }
 
-    pub fn run_sql(&mut self, _selection_only: bool) {
+    #[inline]
+    pub fn editor_id(&self) -> egui::Id {
+        egui::Id::new("sql_main_editor").with(self.active_tab_id)
+    }
+
+    pub fn get_active_selection(&self, ctx: &Context) -> Option<String> {
+        let tab = self.active_tab()?;
+        let text_edit_id = self.editor_id();
+        let state = egui::text_edit::TextEditState::load(ctx, text_edit_id)
+            .or_else(|| egui::text_edit::TextEditState::load(ctx, egui::Id::new("sql_main_editor")))?;
+        let range = state.cursor.char_range()?;
+        let p = range.primary.index;
+        let s = range.secondary.index;
+        if p != s {
+            let start = p.min(s);
+            let end = p.max(s);
+            let chars: Vec<char> = tab.content.chars().collect();
+            let total_chars = chars.len();
+            if start < total_chars {
+                let safe_end = end.min(total_chars);
+                let selected: String = chars[start..safe_end].iter().collect();
+                if !selected.trim().is_empty() {
+                    return Some(selected);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn run_sql(&mut self, ctx: Option<&Context>) {
         if self.busy {
             return;
         }
@@ -374,7 +456,13 @@ impl SqlEditorApp {
             return;
         };
 
-        let sql = tab.content.trim().to_string();
+        let selected_sql = ctx.and_then(|c| self.get_active_selection(c));
+
+        let sql = match selected_sql {
+            Some(ref sel) => sel.trim().to_string(),
+            None => tab.content.trim().to_string(),
+        };
+
         let statements = split_sql_statements(&sql);
 
         if statements.is_empty() {
@@ -646,7 +734,7 @@ impl eframe::App for SqlEditorApp {
 
         let theme = self.theme.clone();
 
-        let text_edit_id = egui::Id::new("sql_main_editor");
+        let mut text_edit_id = self.editor_id();
 
         // Editor & Autocomplete keyboard handling
         let mut do_insert_autocomplete = false;
@@ -691,12 +779,13 @@ impl eframe::App for SqlEditorApp {
         }
 
         // Keyboard shortcuts
+        let mut do_run_sql = false;
         ctx.input(|i| {
             if (i.modifiers.command || i.modifiers.ctrl) && i.key_pressed(Key::Enter) {
-                self.run_sql(false);
+                do_run_sql = true;
             }
             if i.key_pressed(Key::F5) {
-                self.run_sql(false);
+                do_run_sql = true;
             }
             if (i.modifiers.command || i.modifiers.ctrl) && i.key_pressed(Key::S) {
                 if i.modifiers.shift {
@@ -726,6 +815,10 @@ impl eframe::App for SqlEditorApp {
                 }
             }
         });
+
+        if do_run_sql {
+            self.run_sql(Some(ctx));
+        }
 
         // 1. Top Menu Bar
         egui::TopBottomPanel::top("top_menu_panel")
@@ -789,7 +882,7 @@ impl eframe::App for SqlEditorApp {
                     )
                     .fill(theme.c_btn_primary());
                     if ui.add(run_btn).clicked() {
-                        self.run_sql(false);
+                        self.run_sql(Some(ctx));
                     }
 
                     // Save button
@@ -1006,6 +1099,7 @@ impl eframe::App for SqlEditorApp {
                     ui.separator();
 
                     // Text Editor Area
+                    text_edit_id = self.editor_id();
                     let font_size = self.settings.editor_font_size as f32;
                     let font_id = FontId::monospace(font_size);
                     let syntax_on = self.settings.syntax_highlighting;

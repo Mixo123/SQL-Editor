@@ -422,3 +422,144 @@ fn test_in_app_download() {
     assert!(!p2.finished);
     assert!(!target_file2.exists());
 }
+
+#[test]
+fn test_selected_query_execution() {
+    let mut app = sql_editor::app::SqlEditorApp::default();
+    let ctx = egui::Context::default();
+
+    let sql_content = "SELECT 1;\nSELECT 2;\nSELECT 3;\n";
+    if let Some(tab) = app.active_tab_mut() {
+        tab.content = sql_content.to_string();
+    }
+
+    let editor_id = app.editor_id();
+
+    // 1. No selection (cursor at position 5, not selecting anything)
+    let mut state = egui::text_edit::TextEditState::default();
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(5))));
+    state.store(&ctx, editor_id);
+
+    assert_eq!(app.get_active_selection(&ctx), None);
+
+    // 2. Select only "SELECT 2;" (chars 10..19)
+    let start_idx = 10;
+    let end_idx = 19;
+    assert_eq!(&sql_content[start_idx..end_idx], "SELECT 2;");
+
+    let mut state = egui::text_edit::TextEditState::default();
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+        egui::text::CCursor::new(start_idx),
+        egui::text::CCursor::new(end_idx),
+    )));
+    state.store(&ctx, editor_id);
+
+    let selected = app.get_active_selection(&ctx);
+    assert_eq!(selected, Some("SELECT 2;".to_string()));
+    let stmts = split_sql_statements(&selected.unwrap());
+    assert_eq!(stmts, vec!["SELECT 2"]);
+
+    // 3. Backward selection (drag from 19 back to 10)
+    let mut state = egui::text_edit::TextEditState::default();
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+        egui::text::CCursor::new(end_idx),
+        egui::text::CCursor::new(start_idx),
+    )));
+    state.store(&ctx, editor_id);
+
+    let selected = app.get_active_selection(&ctx);
+    assert_eq!(selected, Some("SELECT 2;".to_string()));
+
+    // 4. Select multiple queries (SELECT 1 and SELECT 2, chars 0..19)
+    let mut state = egui::text_edit::TextEditState::default();
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+        egui::text::CCursor::new(0),
+        egui::text::CCursor::new(end_idx),
+    )));
+    state.store(&ctx, editor_id);
+
+    let selected = app.get_active_selection(&ctx);
+    assert_eq!(selected, Some("SELECT 1;\nSELECT 2;".to_string()));
+    let stmts = split_sql_statements(&selected.unwrap());
+    assert_eq!(stmts, vec!["SELECT 1", "SELECT 2"]);
+
+    // 5. UTF-8 characters (Polish letters: ą, ę, ś, ć, ż, ź, etc.)
+    let utf8_sql = "SELECT * FROM pracownicy WHERE imię = 'Michał';\nSELECT 99;\n";
+    if let Some(tab) = app.active_tab_mut() {
+        tab.content = utf8_sql.to_string();
+    }
+    let first_query_char_count = "SELECT * FROM pracownicy WHERE imię = 'Michał';".chars().count();
+    let mut state = egui::text_edit::TextEditState::default();
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+        egui::text::CCursor::new(0),
+        egui::text::CCursor::new(first_query_char_count),
+    )));
+    state.store(&ctx, editor_id);
+
+    let selected = app.get_active_selection(&ctx);
+    assert_eq!(selected, Some("SELECT * FROM pracownicy WHERE imię = 'Michał';".to_string()));
+    let stmts = split_sql_statements(&selected.unwrap());
+    assert_eq!(stmts, vec!["SELECT * FROM pracownicy WHERE imię = 'Michał'"]);
+
+    // 6. Test with a sqlite connection and run_sql
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let db_path = tmp_dir.path().join("selection_test.db");
+    let db_str = db_path.to_str().unwrap();
+
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute("CREATE TABLE t (id INT)", []).unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)", []).unwrap();
+    }
+
+    app.connections.push(sql_editor::db::types::ConnectionMeta {
+        name: "test_db".to_string(),
+        kind: "sqlite".to_string(),
+        host: String::new(),
+        port: String::new(),
+        db: String::new(),
+        user: String::new(),
+        password: String::new(),
+        ssl: false,
+        path: db_str.to_string(),
+        project: String::new(),
+        location: String::new(),
+    });
+    app.active_conn_name = Some("test_db".to_string());
+    app.settings.warn_unbounded_select = false;
+
+    if let Some(tab) = app.active_tab_mut() {
+        tab.content = "SELECT 1;\nSELECT 2;\nSELECT 3;\n".to_string();
+    }
+
+    // A) With selection: only selected query executes (1 query result)
+    let mut state = egui::text_edit::TextEditState::default();
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+        egui::text::CCursor::new(10),
+        egui::text::CCursor::new(19),
+    )));
+    state.store(&ctx, editor_id);
+
+    app.run_sql(Some(&ctx));
+    assert_eq!(app.query_results.len(), 1);
+
+    while app.busy {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        app.poll_query_results();
+    }
+    assert_eq!(app.query_results.len(), 1);
+
+    // B) Without selection: all queries execute (3 query results)
+    let mut state = egui::text_edit::TextEditState::default();
+    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(0))));
+    state.store(&ctx, editor_id);
+
+    app.run_sql(Some(&ctx));
+    assert_eq!(app.query_results.len(), 3);
+
+    while app.busy {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        app.poll_query_results();
+    }
+    assert_eq!(app.query_results.len(), 3);
+}
