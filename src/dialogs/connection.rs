@@ -126,6 +126,7 @@ impl ConnectionDialog {
                         .selected_text(&self.meta.kind)
                         .show_ui(ui, |ui| {
                             ui.selectable_value(&mut self.meta.kind, "sqlite".to_string(), "SQLite");
+                            ui.selectable_value(&mut self.meta.kind, "duckdb".to_string(), "DuckDB");
                             ui.selectable_value(&mut self.meta.kind, "postgres".to_string(), "PostgreSQL");
                             ui.selectable_value(&mut self.meta.kind, "mysql".to_string(), "MySQL");
                             ui.selectable_value(&mut self.meta.kind, "oracle".to_string(), "Oracle");
@@ -155,15 +156,18 @@ impl ConnectionDialog {
 
                 // Specific fields depending on kind
                 match self.meta.kind.as_str() {
-                    "sqlite" => {
+                    "sqlite" | "duckdb" => {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(tr("lbl_db_file")).strong());
                             ui.text_edit_singleline(&mut self.meta.path);
                             if ui.button("📂 Przeglądaj…").clicked() {
-                                if let Some(path) = rfd::FileDialog::new()
-                                    .add_filter("SQLite Database", &["db", "sqlite", "sqlite3"])
-                                    .pick_file()
-                                {
+                                let mut dialog = rfd::FileDialog::new();
+                                if self.meta.kind == "duckdb" {
+                                    dialog = dialog.add_filter("DuckDB Database", &["duckdb", "db", "ddb", "parquet", "csv"]);
+                                } else {
+                                    dialog = dialog.add_filter("SQLite Database", &["db", "sqlite", "sqlite3"]);
+                                }
+                                if let Some(path) = dialog.pick_file() {
                                     self.meta.path = path.to_string_lossy().to_string();
                                     if self.meta.name.is_empty() {
                                         if let Some(stem) = path.file_stem() {
@@ -173,6 +177,18 @@ impl ConnectionDialog {
                                 }
                             }
                         });
+                        if self.meta.kind == "duckdb" {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Wskazówka:").size(11.0).color(Color32::GRAY));
+                                ui.label(RichText::new("Możesz wybrać plik lub wpisać ':memory:'.").size(11.0).color(Color32::GRAY));
+                                if ui.small_button("Użyj :memory:").clicked() {
+                                    self.meta.path = ":memory:".to_string();
+                                    if self.meta.name.is_empty() {
+                                        self.meta.name = "DuckDB (In-Memory)".to_string();
+                                    }
+                                }
+                            });
+                        }
                     }
                     "bigquery" => {
                         ui.horizontal(|ui| {

@@ -9,7 +9,7 @@ use crate::crypto::{decrypt_str, encrypt_str};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionMeta {
     pub name: String,
-    pub kind: String, // "sqlite", "postgres", "mysql", "oracle", "mssql", "bigquery"
+    pub kind: String, // "sqlite", "duckdb", "postgres", "mysql", "oracle", "mssql", "bigquery"
     #[serde(default)]
     pub host: String,
     #[serde(default)]
@@ -42,7 +42,7 @@ impl ConnectionMeta {
     pub fn build_dsn(&self) -> String {
         let plain_pwd = self.get_decrypted_password();
         match self.kind.as_str() {
-            "sqlite" => self.path.clone(),
+            "sqlite" | "duckdb" => self.path.clone(),
             "mysql" => {
                 let host = if self.host.is_empty() { "localhost" } else { &self.host };
                 let port = if self.port.is_empty() { "3306" } else { &self.port };

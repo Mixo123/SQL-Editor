@@ -970,6 +970,7 @@ impl eframe::App for SqlEditorApp {
                         for (name, kind) in names_kinds {
                             let icon = match kind.as_str() {
                                 "sqlite" => "🗄",
+                                "duckdb" => "🦆",
                                 "postgres" | "postgresql" => "🐘",
                                 "mysql" => "🐬",
                                 "oracle" => "🔴",
