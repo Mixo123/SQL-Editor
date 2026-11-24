@@ -27,6 +27,7 @@ pub fn get_keywords() -> &'static HashSet<&'static str> {
             "SHOW", "DESCRIBE", "EXPLAIN", "TRUNCATE", "CASCADE",
             "TOP", "EXEC", "EXECUTE", "PROCEDURE", "DECLARE", "DUAL", "ROWNUM",
             "STRUCT", "ARRAY", "UNNEST", "QUALIFY", "EXCEPT", "MERGE", "MATCHED",
+            "CATALOG", "USE", "DELTA", "OPTIMIZE", "VACUUM", "ZORDER", "PIVOT", "UNPIVOT",
         ]
         .into_iter()
         .collect()

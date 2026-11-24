@@ -563,3 +563,305 @@ fn test_selected_query_execution() {
     }
     assert_eq!(app.query_results.len(), 3);
 }
+
+#[test]
+fn test_duckdb_query_and_schema() {
+    use sql_editor::db::duckdb::{execute_duckdb_stream, get_duckdb_schema, test_duckdb};
+
+    // 1. In-memory connection check & query
+    test_duckdb(":memory:").unwrap();
+    let mut mem_rows = Vec::new();
+    execute_duckdb_stream(":memory:", "SELECT 42 AS answer, 'duck' AS kind", 10, |_, rows| {
+        mem_rows.extend(rows);
+    })
+    .unwrap();
+    assert_eq!(
+        mem_rows,
+        vec![vec![Some("42".to_string()), Some("duck".to_string())]]
+    );
+
+    // 2. File-based DuckDB database
+    let tmp_dir = tempfile::tempdir().unwrap();
+    let db_path = tmp_dir.path().join("analytics.duckdb");
+    let db_str = db_path.to_str().unwrap();
+
+    {
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE events (id INTEGER, event_name VARCHAR, amount DOUBLE, active BOOLEAN)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO events VALUES (1, 'purchase', 199.5, true), (2, 'refund', NULL, false)",
+            [],
+        )
+        .unwrap();
+    }
+
+    test_duckdb(db_str).unwrap();
+
+    let schema = get_duckdb_schema(db_str).unwrap();
+    assert!(schema.contains_key("events"));
+    assert_eq!(
+        schema["events"],
+        vec!["id", "event_name", "amount", "active"]
+    );
+
+    let mut cols_out = None;
+    let mut rows_out = Vec::new();
+    execute_duckdb_stream(
+        db_str,
+        "SELECT id, event_name, amount, active FROM events ORDER BY id",
+        100,
+        |cols, rows| {
+            if let Some(c) = cols {
+                cols_out = Some(c);
+            }
+            rows_out.extend(rows);
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        cols_out.unwrap(),
+        vec!["id", "event_name", "amount", "active"]
+    );
+    assert_eq!(rows_out.len(), 2);
+    assert_eq!(
+        rows_out[0],
+        vec![
+            Some("1".to_string()),
+            Some("purchase".to_string()),
+            Some("199.5".to_string()),
+            Some("true".to_string()),
+        ]
+    );
+    assert_eq!(
+        rows_out[1],
+        vec![
+            Some("2".to_string()),
+            Some("refund".to_string()),
+            None,
+            Some("false".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn test_databricks_query_and_schema() {
+    use serde_json::{json, Value};
+    use sql_editor::db::databricks::{
+        execute_databricks_with_transport, extract_warehouse_id,
+        get_databricks_schema_with_transport, resolve_base_url, DatabricksTransport,
+    };
+    use sql_editor::db::types::ConnectionMeta;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    // 1. URL & Warehouse ID parsing
+    assert_eq!(
+        resolve_base_url("dbc-a1b2c3d4.cloud.databricks.com").unwrap(),
+        "https://dbc-a1b2c3d4.cloud.databricks.com"
+    );
+    assert_eq!(
+        resolve_base_url("https://adb-123456.7.azuredatabricks.net/?o=123456").unwrap(),
+        "https://adb-123456.7.azuredatabricks.net"
+    );
+    assert_eq!(
+        resolve_base_url("http://127.0.0.1:8080/").unwrap(),
+        "http://127.0.0.1:8080"
+    );
+
+    assert_eq!(
+        extract_warehouse_id("1a2b3c4d5e6f7g8h").unwrap(),
+        "1a2b3c4d5e6f7g8h"
+    );
+    assert_eq!(
+        extract_warehouse_id("/sql/1.0/warehouses/1a2b3c4d5e6f7g8h").unwrap(),
+        "1a2b3c4d5e6f7g8h"
+    );
+    assert_eq!(
+        extract_warehouse_id("/sql/1.0/endpoints/wh_legacy_99/").unwrap(),
+        "wh_legacy_99"
+    );
+
+    // 2. ConnectionMeta & encrypted token DSN
+    let mut meta = ConnectionMeta {
+        name: "Prod Lakehouse".to_string(),
+        kind: "databricks".to_string(),
+        host: "dbc-test.cloud.databricks.com".to_string(),
+        port: "443".to_string(),
+        db: "sales".to_string(),
+        user: String::new(),
+        password: String::new(),
+        ssl: true,
+        path: "/sql/1.0/warehouses/wh_abc123".to_string(),
+        project: "main".to_string(),
+        location: String::new(),
+    };
+    meta.set_password_plain("dapi_secret_token_xyz");
+    let dsn = meta.build_dsn();
+    assert!(dsn.starts_with("databricks://token:dapi_secret_token_xyz@dbc-test.cloud.databricks.com/"));
+    assert!(dsn.contains("catalog=main"));
+    assert!(dsn.contains("schema=sales"));
+
+    // 3. Mock Databricks REST API transport (async polling + multi-chunk + schema + errors)
+    struct MockTransport {
+        poll_count: Mutex<usize>,
+    }
+
+    impl DatabricksTransport for MockTransport {
+        fn post_json(&self, url: &str, token: &str, body: &str) -> Result<Value, String> {
+            assert_eq!(
+                url,
+                "https://dbc-test.cloud.databricks.com/api/2.0/sql/statements"
+            );
+            assert_eq!(token, "dapi_secret_token_xyz");
+            let req: Value = serde_json::from_str(body).unwrap();
+            assert_eq!(req["warehouse_id"], "wh_abc123");
+            assert_eq!(req["catalog"], "main");
+            assert_eq!(req["schema"], "sales");
+
+            let stmt = req["statement"].as_str().unwrap();
+            if stmt.contains("information_schema.columns") {
+                Ok(json!({
+                    "statement_id": "stmt-schema-1",
+                    "status": { "state": "SUCCEEDED" },
+                    "manifest": {
+                        "schema": {
+                            "columns": [
+                                { "name": "table_name" },
+                                { "name": "column_name" }
+                            ]
+                        }
+                    },
+                    "result": {
+                        "data_array": [
+                            ["orders", "order_id"],
+                            ["orders", "total_usd"],
+                            ["customers", "customer_id"]
+                        ]
+                    }
+                }))
+            } else if stmt.contains("BAD_QUERY") {
+                Ok(json!({
+                    "statement_id": "stmt-err-1",
+                    "status": {
+                        "state": "FAILED",
+                        "error": {
+                            "error_code": "SYNTAX_ERROR",
+                            "message": "Table or view not found"
+                        }
+                    }
+                }))
+            } else {
+                // Simulate async PENDING on initial POST
+                Ok(json!({
+                    "statement_id": "stmt-async-42",
+                    "status": { "state": "PENDING" }
+                }))
+            }
+        }
+
+        fn get_json(&self, url: &str, token: &str) -> Result<Value, String> {
+            assert_eq!(token, "dapi_secret_token_xyz");
+            if url.ends_with("/api/2.0/sql/statements/stmt-async-42") {
+                let mut c = self.poll_count.lock().unwrap();
+                *c += 1;
+                if *c == 1 {
+                    Ok(json!({
+                        "statement_id": "stmt-async-42",
+                        "status": { "state": "RUNNING" }
+                    }))
+                } else {
+                    Ok(json!({
+                        "statement_id": "stmt-async-42",
+                        "status": { "state": "SUCCEEDED" },
+                        "manifest": {
+                            "schema": {
+                                "columns": [
+                                    { "name": "order_id" },
+                                    { "name": "customer" },
+                                    { "name": "notes" }
+                                ]
+                            }
+                        },
+                        "result": {
+                            "chunk_index": 0,
+                            "data_array": [
+                                ["101", "Alice", null]
+                            ],
+                            "next_chunk_index": 1
+                        }
+                    }))
+                }
+            } else if url.ends_with("/api/2.0/sql/statements/stmt-async-42/result/chunks/1") {
+                Ok(json!({
+                    "chunk_index": 1,
+                    "data_array": [
+                        ["102", "Bob", "VIP"]
+                    ]
+                }))
+            } else {
+                Err(format!("Unexpected URL: {}", url))
+            }
+        }
+    }
+
+    let transport = MockTransport {
+        poll_count: Mutex::new(0),
+    };
+
+    // Test async polling + multi-chunk streaming
+    let mut cols_received = None;
+    let mut rows_received = Vec::new();
+    execute_databricks_with_transport(
+        &meta,
+        "SELECT order_id, customer, notes FROM orders",
+        100,
+        &transport,
+        Duration::from_millis(1),
+        |cols, rows| {
+            if let Some(c) = cols {
+                cols_received = Some(c);
+            }
+            rows_received.extend(rows);
+        },
+    )
+    .unwrap();
+
+    assert_eq!(cols_received.unwrap(), vec!["order_id", "customer", "notes"]);
+    assert_eq!(rows_received.len(), 2);
+    assert_eq!(
+        rows_received[0],
+        vec![Some("101".to_string()), Some("Alice".to_string()), None]
+    );
+    assert_eq!(
+        rows_received[1],
+        vec![
+            Some("102".to_string()),
+            Some("Bob".to_string()),
+            Some("VIP".to_string()),
+        ]
+    );
+
+    // Test Unity Catalog schema introspection
+    let schema =
+        get_databricks_schema_with_transport(&meta, &transport, Duration::from_millis(1)).unwrap();
+    assert_eq!(schema["orders"], vec!["order_id", "total_usd"]);
+    assert_eq!(schema["customers"], vec!["customer_id"]);
+
+    // Test FAILED statement error propagation
+    let err = execute_databricks_with_transport(
+        &meta,
+        "SELECT * FROM BAD_QUERY",
+        10,
+        &transport,
+        Duration::from_millis(1),
+        |_, _| {},
+    )
+    .unwrap_err();
+    assert!(err.contains("SYNTAX_ERROR"));
+    assert!(err.contains("Table or view not found"));
+}

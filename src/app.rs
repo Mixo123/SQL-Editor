@@ -976,6 +976,7 @@ impl eframe::App for SqlEditorApp {
                                 "oracle" => "🔴",
                                 "mssql" => "🪟",
                                 "bigquery" => "☁️",
+                                "databricks" => "🧱",
                                 _ => "🔌",
                             };
                             let label_text = format!("{}  {}", icon, name);

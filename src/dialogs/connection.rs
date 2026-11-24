@@ -132,11 +132,12 @@ impl ConnectionDialog {
                             ui.selectable_value(&mut self.meta.kind, "oracle".to_string(), "Oracle");
                             ui.selectable_value(&mut self.meta.kind, "mssql".to_string(), "Microsoft SQL Server");
                             ui.selectable_value(&mut self.meta.kind, "bigquery".to_string(), "Google BigQuery");
+                            ui.selectable_value(&mut self.meta.kind, "databricks".to_string(), "Databricks");
                         });
 
                     if self.meta.kind != prev_kind {
-                        // Adjust default ports
-                        if self.meta.kind == "postgres" && (self.meta.port.is_empty() || self.meta.port == "3306" || self.meta.port == "1521" || self.meta.port == "1433") {
+                        // Adjust default ports / host
+                        if self.meta.kind == "postgres" && (self.meta.port.is_empty() || self.meta.port == "3306" || self.meta.port == "1521" || self.meta.port == "1433" || self.meta.port == "443") {
                             self.meta.port = "5432".to_string();
                         } else if self.meta.kind == "mysql" {
                             self.meta.port = "3306".to_string();
@@ -144,6 +145,11 @@ impl ConnectionDialog {
                             self.meta.port = "1521".to_string();
                         } else if self.meta.kind == "mssql" {
                             self.meta.port = "1433".to_string();
+                        } else if self.meta.kind == "databricks" {
+                            if self.meta.host == "localhost" {
+                                self.meta.host.clear();
+                            }
+                            self.meta.port = "443".to_string();
                         }
                     }
                 });
@@ -216,6 +222,50 @@ impl ConnectionDialog {
                             ui.label(RichText::new(tr("lbl_location")).strong());
                             ui.text_edit_singleline(&mut self.meta.location);
                         });
+                    }
+                    "databricks" => {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(tr("lbl_server_hostname")).strong());
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.meta.host)
+                                    .hint_text("dbc-xxxx.cloud.databricks.com"),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(tr("lbl_http_path_warehouse")).strong());
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.meta.path)
+                                    .hint_text("/sql/1.0/warehouses/1a2b3c4d5e6f7g8h"),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(tr("lbl_access_token")).strong());
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.meta.password)
+                                    .password(true)
+                                    .hint_text("dapi..."),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(tr("lbl_catalog")).strong());
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.meta.project)
+                                    .desired_width(130.0)
+                                    .hint_text("main"),
+                            );
+                            ui.label(RichText::new(tr("lbl_schema")).strong());
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.meta.db)
+                                    .desired_width(130.0)
+                                    .hint_text("default"),
+                            );
+                        });
+                        ui.label(
+                            RichText::new(tr("hint_databricks"))
+                                .size(11.0)
+                                .italics()
+                                .color(Color32::GRAY),
+                        );
                     }
                     _ => {
                         // Host & Port

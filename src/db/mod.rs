@@ -1,5 +1,6 @@
 //! Database connectivity and query execution engine.
 
+pub mod databricks;
 pub mod duckdb;
 pub mod mysql;
 pub mod postgres;
@@ -40,13 +41,14 @@ pub fn test_connection(meta: &ConnectionMeta) -> Result<(), String> {
     match meta.kind.as_str() {
         "sqlite" => sqlite::test_sqlite(&dsn),
         "duckdb" => duckdb::test_duckdb(&dsn),
+        "databricks" => databricks::test_databricks(meta),
         "postgres" | "postgresql" => postgres::test_postgres(&dsn),
         "mysql" => mysql::test_mysql(&dsn),
         "oracle" => {
-            Err("Oracle database driver requires Oracle Instant Client C libraries. Please connect via PostgreSQL, MySQL, SQLite, or DuckDB in this build.".to_string())
+            Err("Oracle database driver requires Oracle Instant Client C libraries. Please connect via PostgreSQL, MySQL, SQLite, DuckDB, or Databricks in this build.".to_string())
         }
         "mssql" => {
-            Err("Microsoft SQL Server driver requires FreeTDS / ODBC libraries. Please connect via PostgreSQL, MySQL, SQLite, or DuckDB in this build.".to_string())
+            Err("Microsoft SQL Server driver requires FreeTDS / ODBC libraries. Please connect via PostgreSQL, MySQL, SQLite, DuckDB, or Databricks in this build.".to_string())
         }
         "bigquery" => {
             Err("Google BigQuery requires Google Cloud Service Account credentials JSON and GCP API access. Please check configuration.".to_string())
@@ -60,6 +62,7 @@ pub fn get_schema(meta: &ConnectionMeta) -> Result<SchemaMap, String> {
     match meta.kind.as_str() {
         "sqlite" => sqlite::get_sqlite_schema(&dsn),
         "duckdb" => duckdb::get_duckdb_schema(&dsn),
+        "databricks" => databricks::get_databricks_schema(meta),
         "postgres" | "postgresql" => postgres::get_postgres_schema(&dsn),
         "mysql" => mysql::get_mysql_schema(&dsn),
         _ => Ok(std::collections::HashMap::new()),
@@ -79,6 +82,7 @@ where
     match meta.kind.as_str() {
         "sqlite" => sqlite::execute_sqlite_stream(&dsn, sql, limit, on_batch),
         "duckdb" => duckdb::execute_duckdb_stream(&dsn, sql, limit, on_batch),
+        "databricks" => databricks::execute_databricks_stream(meta, sql, limit, on_batch),
         "postgres" | "postgresql" => postgres::execute_postgres_stream(&dsn, sql, limit, on_batch),
         "mysql" => mysql::execute_mysql_stream(&dsn, sql, limit, on_batch),
         "oracle" | "mssql" | "bigquery" => {

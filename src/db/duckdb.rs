@@ -3,7 +3,6 @@
 use duckdb::types::{TimeUnit, ValueRef};
 use duckdb::Connection;
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use super::sqlite::resolve_db_path;
 use super::types::SchemaMap;
@@ -160,7 +159,7 @@ where
         let mut batch = Vec::new();
 
         let mut rows = stmt.query([]).map_err(|e| format_duckdb_error(&e))?;
-        let cols: Vec<String> = stmt.column_names();
+        let cols: Vec<String> = rows.as_ref().map(|s| s.column_names()).unwrap_or_default();
 
         while let Some(row) = rows.next().map_err(|e| format_duckdb_error(&e))? {
             let mut record = Vec::with_capacity(col_count);

@@ -9,7 +9,7 @@ use crate::crypto::{decrypt_str, encrypt_str};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionMeta {
     pub name: String,
-    pub kind: String, // "sqlite", "duckdb", "postgres", "mysql", "oracle", "mssql", "bigquery"
+    pub kind: String, // "sqlite", "duckdb", "postgres", "mysql", "oracle", "mssql", "bigquery", "databricks"
     #[serde(default)]
     pub host: String,
     #[serde(default)]
@@ -101,6 +101,28 @@ impl ConnectionMeta {
                     format!("/{}", self.db)
                 };
                 format!("bigquery://{}{}{}", project, ds, q)
+            }
+            "databricks" => {
+                let host = self.host.trim();
+                let wh = self.path.trim().trim_start_matches('/');
+                let mut params = Vec::new();
+                if !self.project.trim().is_empty() {
+                    params.push(format!("catalog={}", urlencoding::encode(self.project.trim())));
+                }
+                if !self.db.trim().is_empty() {
+                    params.push(format!("schema={}", urlencoding::encode(self.db.trim())));
+                }
+                let q = if params.is_empty() {
+                    String::new()
+                } else {
+                    format!("?{}", params.join("&"))
+                };
+                let auth = if plain_pwd.is_empty() {
+                    String::new()
+                } else {
+                    format!("token:{}@", urlencoding::encode(&plain_pwd))
+                };
+                format!("databricks://{}{}/{}{}", auth, host, wh, q)
             }
             _ => {
                 // postgres

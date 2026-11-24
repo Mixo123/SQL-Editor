@@ -17,6 +17,7 @@ pub const SQL_KEYWORDS: &[&str] = &[
     "TRUE", "FALSE", "OVER", "PARTITION", "SHOW", "DESCRIBE", "EXPLAIN",
     "TRUNCATE", "CASCADE", "TOP", "EXEC", "EXECUTE", "PROCEDURE", "DECLARE",
     "DUAL", "ROWNUM", "STRUCT", "ARRAY", "UNNEST", "QUALIFY", "EXCEPT", "MERGE", "MATCHED",
+    "CATALOG", "USE", "DELTA", "OPTIMIZE", "VACUUM", "ZORDER", "PIVOT", "UNPIVOT",
 ];
 
 pub const SQL_FUNCTIONS: &[&str] = &[
@@ -27,7 +28,8 @@ pub const SQL_FUNCTIONS: &[&str] = &[
     "ROW_NUMBER", "RANK", "DENSE_RANK", "LEAD", "LAG",
     "NVL", "NVL2", "SYSDATE", "TO_DATE", "TO_CHAR", "DECODE",
     "SAFE_CAST", "GETDATE", "DATEADD", "DATEDIFF", "ISNULL",
-    "PARSE_DATE", "FORMAT_DATE",
+    "PARSE_DATE", "FORMAT_DATE", "TRY_CAST", "IFF",
+    "READ_PARQUET", "READ_CSV", "READ_JSON", "CURRENT_CATALOG", "CURRENT_SCHEMA",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
